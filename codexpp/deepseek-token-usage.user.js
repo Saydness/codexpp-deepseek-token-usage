@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.0.0
+// @version      1.13.0
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.12.0";
+  const VERSION = "1.13.0";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -684,10 +684,18 @@
     const value = String(url || "").toLowerCase();
     return (
       value.includes("deepseek") ||
-      value.includes("127.0.0.1:8787") ||
+      isLoopbackUrl(value) ||
       value.includes("/responses") ||
       value.includes("/chat/completions") ||
       value.includes("/completions")
+    );
+  }
+
+  function isLoopbackUrl(value) {
+    return (
+      value.includes("127.0.0.1") ||
+      value.includes("localhost") ||
+      value.includes("[::1]")
     );
   }
 
