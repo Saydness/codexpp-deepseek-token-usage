@@ -1,0 +1,14 @@
+*.log
+*.jsonl
+*.db
+*.sqlite
+*.sqlite3
+*.png
+*.jpg
+*.jpeg
+*.zip
+
+node_modules/
+__pycache__/
+.DS_Store
+Thumbs.db
