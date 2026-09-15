@@ -5,21 +5,22 @@
 ## 功能
 
 - 自动捕获 Codex 会话中的 DeepSeek token 使用数据；
-- 支持按天、按月查看 token 用量和费用；
+- 支持按天、按月查看 token 用量和费用，打开面板默认落在当天；
 - 每个请求优先使用该请求携带的模型，按照不同模型的官方费率分别计算；
 - 区分缓存命中、缓存未命中、输出 tokens 和思考 tokens；
 - 按北京时间峰谷时段计算费用；
-- 图表柱和费用点支持鼠标悬浮查看节点用量；
+- 图表柱和费用点支持鼠标悬浮查看该节点的用量；
 - 面板四边和四个角都可以拖动缩放，位置和大小会记住；
 - 可收起成仅显示 token 用量和费用的 mini 状态条；
-- 首次打开强制显示完整面板。
+- 首次打开显示完整面板；
+- 可选：账户余额、每日收盘余额与余额消耗（需要本机助手，见下）。
 
 ## 环境要求
 
 - Windows
 - 已安装 Codex++ 和 Codex 桌面端
 
-插件本身是 Codex++ 用户脚本，不需要 Python、Node.js 或额外后台服务。
+面板本身是 Codex++ 用户脚本，不联网、不需要 Python 或 Node.js。只有可选的「账户余额」功能需要一个额外的本机助手。
 
 ## 安装
 
@@ -60,21 +61,54 @@ codexpp\deepseek-token-usage.user.js
 
 如果文件中已有其他脚本，请保留原有条目，只增加上面这一项。
 
+## 账户余额（可选）
+
+余额接口需要鉴权，而 Codex 页面被安全策略禁止联网，所以余额只能由页面之外的本机助手读取，再把数字交给面板。仓库里的 `helper/` 就是这个小助手：
+
+```text
+helper/
+├─ dstu-helper.mjs       # 本体：定时读余额、把数字推给面板
+├─ balance_sources.mjs   # 余额来源解析
+├─ set_balance_key.ps1   # 用 Windows DPAPI 保存 / 查看 / 清除 Key
+├─ start-helper.vbs      # 随 Codex 启停的看门狗
+└─ README.md
+```
+
+需要 Node.js 18 以上，手动启动：
+
+```powershell
+node helper\dstu-helper.mjs
+```
+
+想让它跟着 Codex 自动启停，把 `helper\start-helper.vbs` 的快捷方式放进 `shell:startup`：Codex 启动时它才去读余额，Codex 退出后助手一起停，平时不占资源。
+
+余额来源按顺序尝试：
+
+| 顺序 | 来源 | 说明 |
+|---|---|---|
+| 1 | 本机代理 | 需要自己设置 `DSTU_BALANCE_URL` 指向代理的余额接口 |
+| 2 | `DEEPSEEK_API_KEY` | 环境变量里的 Key |
+| 3 | Codex 配置的 `env_key` | `config.toml` 里 `env_key` 指到的环境变量 |
+| 4 | `~/.codex/auth.json` | Codex 自己保存的 Key |
+| 5 | 本机加密保存的 Key | 在面板里填一次 Key，由助手用 DPAPI 加密存到本机 |
+
+不想用余额功能，在面板的「说明」里取消勾选「启用余额统计」即可，用量与费用统计不受影响。
+
 ## 卸载
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
 ```
 
-然后重启 Codex。
+然后重启 Codex。如果装过本机助手，再删掉 `%LOCALAPPDATA%\Codex++\deepseek-balance.key` 即可。
 
 ## 隐私说明
 
-- 插件只在 Codex 本机页面中运行，不启动后台服务，不发送遥测；
-- 不读取、不保存 API Key；
+- 面板只在 Codex 本机页面中运行，不发起任何网络请求，不发送遥测；
+- 面板不保存 API Key：填进「API Key」框的 Key 只留在页面内存里，交给本机助手后立即清空，不写入 localStorage、不随脚本上传；
 - 不读取、不保存聊天正文、提示词或完整响应；
-- 只记录模型名、token 数量、费用、时间等统计字段；
-- 数据保存在 Codex 本机本地存储中；
+- 只记录模型名、token 数量、费用、时间等统计字段，保存在 Codex 本机本地存储里；
+- 可选的本机助手才会联网（DeepSeek 余额接口，或你自己配置的代理地址），它只把余额数字交给面板；Key 用 Windows DPAPI 按当前用户加密保存，从不写进日志；
 - 代码中不包含任何机器 IP、用户名、服务器地址或密钥。
 
 ## 费率说明
