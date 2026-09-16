@@ -12,7 +12,8 @@
 '   DSTU_NODE    full path to node.exe (default: first node found on PATH)
 '   DSTU_HELPER  full path to dstu-helper.mjs (default: next to this file)
 ' An environment variable can also be set from the command line, e.g.
-'   set DSTU_BALANCE_URL=http://127.0.0.1:9229/... (only if you run a proxy)
+'   set DSTU_BALANCE_URL=http://127.0.0.1:<port>/<path>  (only if you run your
+'   own balance proxy; the helper also works with just an API key)
 
 Option Explicit
 
