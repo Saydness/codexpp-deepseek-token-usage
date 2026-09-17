@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.16.1
+// @version      1.17.2
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.16.1";
+const VERSION = "1.17.2";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -25,20 +25,38 @@
   const SAVE_DELAY_MS = 300;
 
   /*
-   * 余额：Codex 的页面被 CSP 禁止联网（default-src 'none'，面板里任何 fetch
-   * 都会被拦下），所以面板自己不去请求余额接口：由随 Codex 一起启动的本机
-   * 助手在页面外读取余额，再回填进来。助手读余额的来源，面板里可以切换：
-   *   自动 → 本机代理 → 环境变量 → Codex 的 auth.json → 本机加密保存的 Key
-   * 用户在面板里填的 Key 只停在页面内存里，交给助手用 DPAPI 加密后存在本机；
-   * 面板自己的 localStorage 不保存任何密钥。不需要余额也可以整套关掉。
+   * 余额：Codex 页面被 CSP 挡在门外（default-src 'none'），面板自己发不出
+   * 普通请求，唯一能出去的路是 Codex++ 的宿主桥：
+   *   window.__codexSessionDeleteBridge("/llm-proxy", { url, method, headers })
+   * 所以余额由面板自己查，Key 由用户提供，来源二选一：
+   *   1. Codex 配置里的 Key（Codex++ /settings/get 的 relayApiKey / auth.json 拖入）
+   *   2. 用户直接粘进面板的 Key
+   * 面板不再依赖任何随 Codex 启动的本机助手：助手在就顺带用，不在也完全不提示。
+   * 桥目前只允许 POST，DeepSeek 余额接口只认 GET，所以查询会先试 GET 再试 POST，
+   * 两条都不通时给出的是桥的限制说明，而不是"助手没在跑"。
    */
   const BALANCE_HELPER_TIMEOUT_MS = 3 * 60 * 1000;
+  const BALANCE_BRIDGE_FN = "__codexSessionDeleteBridge";
+  const BALANCE_BRIDGE_PATH = "/llm-proxy";
+  const BALANCE_ENDPOINT = "https://api.deepseek.com/user/balance";
+  const BALANCE_QUERY_TIMEOUT_MS = 20000;
+  const BALANCE_QUERY_MIN_GAP_MS = 30 * 1000;
+  const BALANCE_QUERY_AUTO_MS = 15 * 60 * 1000;
+  /* 网络桥明确不支持 GET 时别死磕：静默查询退避到 6 小时后，手动点按钮不受限。 */
+  const BALANCE_QUERY_BLOCKED_BACKOFF_MS = 6 * 60 * 60 * 1000;
+  /* 用户勾选"记住"后，Key 存这里（本机 localStorage，不会随脚本上传）。 */
+  const BALANCE_KEY_STORE = "__deepseekUsageBalanceKeyV1";
   /* 状态行只当短提示：助手失联那类消息在恢复后不该一直挂在面板上。 */
   const BALANCE_STATUS_TTL_MS = 45 * 1000;
   const BALANCE_BAR_DAYS = 14;
   const MAX_BALANCE_SNAPSHOTS = 5000;
-  /* 用户刚填、还没交给助手保存的 Key：只存在于页面内存，从不进 localStorage。 */
+  /* 用户刚填的 Key：默认只存在页面内存；勾了"记住"才写 localStorage。 */
   let pendingBalanceKey = "";
+  let panelBalanceKey = "";
+  let balanceConfigKey = "";
+  let balanceAuthKey = "";
+  let balanceQueryPromise = null;
+  let balanceQueryTimer = 0;
 
   const MODEL_OPTIONS = [
     ["deepseek-flash", "DeepSeek Flash (V4.1)"],
@@ -98,6 +116,15 @@
       balanceKeySaved: false,
       balanceKeyPresent: null,
       balanceSourceUsed: "",
+      balanceKeyMode: "auto",
+      balanceKeyRemember: false,
+      balanceKeyFromConfig: false,
+      balanceQueryAt: 0,
+      balanceQueryOk: null,
+      balanceQueryBusy: false,
+      balanceQueryNote: "",
+      balanceQuerySource: "",
+      balanceQueryCooldownUntil: 0,
     },
     activeModel: DEFAULT_MODEL,
     turnTotals: Object.create(null),
@@ -633,6 +660,333 @@
     return "";
   }
 
+  /* ------------------ 面板自己查余额：Key 来源和宿主桥 ------------------ */
+
+  function looksLikeKey(value) {
+    return /^sk-[A-Za-z0-9_-]{8,}$/.test(String(value || "").trim());
+  }
+
+  function maskKeyTail(key) {
+    const text = String(key || "");
+    return text.length >= 12 ? `${text.slice(0, 5)}…${text.slice(-4)}` : "sk-…";
+  }
+
+  function balanceStoredKey() {
+    try {
+      return String(window.localStorage?.getItem(BALANCE_KEY_STORE) || "");
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function writeBalanceStoredKey(key) {
+    try {
+      if (looksLikeKey(key)) window.localStorage?.setItem(BALANCE_KEY_STORE, String(key).trim());
+      else window.localStorage?.removeItem(BALANCE_KEY_STORE);
+    } catch (_) {
+      /* 本机不让写就只保留内存里的那份 */
+    }
+  }
+
+  /*
+   * Key 优先级：面板刚填的 > 本机记住的 > Codex 配置里的（Codex++ 设置里的
+   * relayApiKey）> 用户拖进来的 auth.json。任何一条都不需要额外装助手。
+   */
+  function balanceKeyInfo() {
+    if (looksLikeKey(panelBalanceKey)) {
+      return { key: panelBalanceKey.trim(), label: "面板里填的 Key", source: "panel" };
+    }
+    const stored = balanceStoredKey();
+    if (looksLikeKey(stored)) {
+      return { key: stored.trim(), label: "本机记住的 Key", source: "store" };
+    }
+    /* 手动模式只用用户自己给的那把，不去翻 Codex 配置。 */
+    if (state.settings.balanceKeyMode === "manual") {
+      return { key: "", label: "", source: "" };
+    }
+    if (looksLikeKey(balanceConfigKey)) {
+      return { key: balanceConfigKey.trim(), label: "Codex 配置里的 Key", source: "config" };
+    }
+    if (looksLikeKey(balanceAuthKey)) {
+      return { key: balanceAuthKey.trim(), label: "拖入的 auth.json", source: "auth" };
+    }
+    return { key: "", label: "", source: "" };
+  }
+
+  function balanceKeyText() {
+    const info = balanceKeyInfo();
+    if (!info.key) return "未填 Key";
+    return `${info.label} · ${maskKeyTail(info.key)}`;
+  }
+
+  function balanceBridgeReady() {
+    return typeof window[BALANCE_BRIDGE_FN] === "function";
+  }
+
+  /* 宿主桥：Codex++ 的本地代理，能把一次请求转到任意 HTTPS 地址。 */
+  function callHostBridge(path, payload, timeoutMs = BALANCE_QUERY_TIMEOUT_MS) {
+    if (!balanceBridgeReady()) {
+      return Promise.resolve({ __failed: "当前 Codex++ 没有开放网络桥" });
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = window.setTimeout(
+        () => finish({ __failed: "网络桥超时" }),
+        timeoutMs
+      );
+      try {
+        Promise.resolve(window[BALANCE_BRIDGE_FN](path, payload || {})).then(finish, (error) =>
+          finish({ __failed: String((error && error.message) || error) })
+        );
+      } catch (error) {
+        finish({ __failed: String((error && error.message) || error) });
+      }
+    });
+  }
+
+  function parseBalanceValue(payload) {
+    const infos = Array.isArray(payload?.balance_infos) ? payload.balance_infos : [];
+    if (!infos.length) return null;
+    const chosen =
+      infos.find(
+        (item) => String(item?.currency || "").toUpperCase() === "CNY"
+      ) || infos[0];
+    const value = Number(chosen?.total_balance);
+    if (!Number.isFinite(value)) return null;
+    return {
+      value,
+      currency: String(
+        chosen?.currency || state.settings.balanceCurrency || "CNY"
+      ).toUpperCase(),
+      available: payload?.is_available !== false,
+    };
+  }
+
+  /* 余额接口只认 GET；宿主桥只放 POST，两条都试一遍再决定怎么报错。 */
+  async function requestBalanceOnce(key) {
+    const headers = { Authorization: `Bearer ${key}`, Accept: "application/json" };
+    const reasons = [];
+    let bridgeBlocksGet = false;
+    for (const method of ["GET", "POST"]) {
+      const payload = {
+        url: BALANCE_ENDPOINT,
+        method,
+        headers,
+        timeout_ms: 15000,
+      };
+      if (method === "POST") payload.body = "";
+      const result = await callHostBridge(BALANCE_BRIDGE_PATH, payload);
+      if (result?.__failed) {
+        const message = String(result.__failed);
+        if (method === "GET" && /仅支持\s*POST|POST 请求/.test(message)) {
+          bridgeBlocksGet = true;
+        }
+        reasons.push(`${method}：${message}`);
+        continue;
+      }
+      if (result?.status !== "ok") {
+        const message = String(result?.message || "未知失败");
+        if (method === "GET" && /仅支持\s*POST|POST 请求/.test(message)) {
+          bridgeBlocksGet = true;
+        }
+        reasons.push(`${method}：${message}`);
+        continue;
+      }
+      const status = Number(result.http_status || 0);
+      const body =
+        result.body_json ?? parseJson(String(result.body_text || "")) ?? null;
+      if (status >= 200 && status < 300) {
+        const parsed = parseBalanceValue(body);
+        if (parsed) return { ok: true, ...parsed, method };
+        reasons.push(`${method}：返回里没有余额字段`);
+        continue;
+      }
+      if (status === 401 || status === 403) {
+        return {
+          ok: false,
+          fatal: true,
+          message: `Key 被接口拒绝（HTTP ${status}），检查 Key 是否正确`,
+        };
+      }
+      reasons.push(
+        `${method}：HTTP ${status || "?"}${
+          String(result.body_text || "").trim()
+            ? ` ${String(result.body_text).trim().slice(0, 80)}`
+            : ""
+        }`
+      );
+    }
+    return { ok: false, bridgeBlocksGet, reasons };
+  }
+
+  function balanceQueryFailureText(result) {
+    if (result?.fatal && result.message) return result.message;
+    if (result?.bridgeBlocksGet) {
+      return "面板直连查不了：当前 Codex++ 的网络桥只允许 POST，余额接口只认 GET（先手动记录一次，或等 Codex++ 开放 GET 后自动生效）";
+    }
+    const reasons = Array.isArray(result?.reasons) ? result.reasons : [];
+    if (!reasons.length) return "余额查询失败";
+    return `余额查询失败：${reasons.join("；").slice(0, 160)}`;
+  }
+
+  async function queryBalanceNow({ silent = false } = {}) {
+    if (!balanceEnabled()) {
+      if (!silent) setBalanceStatus("余额功能已关闭，可在「设置」里打开", "warn");
+      return null;
+    }
+    if (balanceQueryPromise) return balanceQueryPromise;
+    if (silent && Date.now() < (Number(state.settings.balanceQueryCooldownUntil) || 0)) {
+      return null;
+    }
+    if (!silent) state.settings.balanceQueryCooldownUntil = 0;
+    /*
+     * 面板永远自己先试一次直连；本机如果还跑着旧助手（8787 代理那套），顺手也请它
+     * 刷一次（它用 GET，读得到），两条路谁先回来用谁，互不依赖。
+     */
+    if (balanceHelperAlive()) {
+      state.settings.balanceRequestAt = Date.now();
+      scheduleSave();
+    }
+    const info = balanceKeyInfo();
+    if (!info.key) {
+      state.settings.balanceQueryOk = null;
+      state.settings.balanceQueryNote =
+        "还没有 Key：填一次就能自动更新，也可以直接用下面的手动记录";
+      if (!silent) {
+        setBalanceStatus("先填一次 API Key，或者手动记录当前余额", "warn");
+      }
+      render();
+      return null;
+    }
+    if (!balanceBridgeReady()) {
+      state.settings.balanceQueryOk = false;
+      state.settings.balanceQueryNote = "当前 Codex++ 没开放网络桥，面板查不到余额（可先手动记录）";
+      if (!silent) setBalanceStatus(state.settings.balanceQueryNote, "warn");
+      render();
+      return null;
+    }
+    state.settings.balanceQueryBusy = true;
+    state.settings.balanceQueryNote = "";
+    state.settings.balanceQueryAt = Date.now();
+    render();
+    const promise = requestBalanceOnce(info.key)
+      .then((result) => {
+        state.settings.balanceQueryBusy = false;
+        if (result?.ok) {
+          state.settings.balanceQueryCooldownUntil = 0;
+          state.settings.balanceQueryOk = true;
+          state.settings.balanceQuerySource = info.source;
+          state.settings.balanceQueryNote = `刚刚更新（${result.method}）`;
+          state.settings.balanceSourceUsed =
+            info.source === "config" ? "auth" : "store";
+          setBalanceStatus(
+            `余额已更新：${formatBalance(result.value, result.currency)}`,
+            "ok"
+          );
+          recordBalance(result.value, {
+            source: "api",
+            currency: result.currency,
+          });
+        } else {
+          state.settings.balanceQueryOk = false;
+          state.settings.balanceQueryNote = balanceQueryFailureText(result);
+          if (result?.bridgeBlocksGet) {
+            state.settings.balanceQueryCooldownUntil =
+              Date.now() + BALANCE_QUERY_BLOCKED_BACKOFF_MS;
+          }
+          if (!silent) {
+            setBalanceStatus(state.settings.balanceQueryNote, "warn");
+          }
+        }
+        scheduleSave();
+        render();
+        return result;
+      })
+      .catch((error) => {
+        state.settings.balanceQueryBusy = false;
+        state.settings.balanceQueryOk = false;
+        state.settings.balanceQueryNote = `余额查询失败：${String(
+          (error && error.message) || error
+        ).slice(0, 120)}`;
+        scheduleSave();
+        render();
+        return null;
+      })
+      .finally(() => {
+        if (balanceQueryPromise === promise) balanceQueryPromise = null;
+      });
+    balanceQueryPromise = promise;
+    return promise;
+  }
+
+  /* 从 Codex 自己的配置里取 Key，省得用户再抄一遍。 */
+  function pickConfigKey(settings) {
+    const candidates = [];
+    if (settings && typeof settings === "object") {
+      candidates.push(settings.relayApiKey);
+      const profiles = Array.isArray(settings.relayProfiles)
+        ? settings.relayProfiles
+        : [];
+      const active =
+        profiles.find((item) => item && item.id === settings.activeRelayId) ||
+        profiles[0];
+      if (active) candidates.push(active.apiKey, active.relayApiKey);
+    }
+    for (const candidate of candidates) {
+      if (looksLikeKey(candidate)) return String(candidate).trim();
+    }
+    return "";
+  }
+
+  async function useCodexConfigKey({ silent = false } = {}) {
+    if (!balanceBridgeReady()) {
+      if (!silent) {
+        setBalanceStatus("当前 Codex++ 没开放网络桥，读不到配置里的 Key", "warn");
+      }
+      return false;
+    }
+    const settings = await callHostBridge("/settings/get", {}, 10000);
+    const key = settings?.__failed ? "" : pickConfigKey(settings);
+    if (!key) {
+      if (!silent) {
+        setBalanceStatus("Codex 配置里没有可用的 Key，直接粘一个到下面也行", "warn");
+      }
+      return false;
+    }
+    balanceConfigKey = key;
+    state.settings.balanceKeyFromConfig = true;
+    state.settings.balanceKeyMode = "auto";
+    scheduleSave();
+    render();
+    if (!silent) {
+      setBalanceStatus(`已读到配置里的 Key（${maskKeyTail(key)}）`, "ok");
+    }
+    queryBalanceNow({ silent: true });
+    return true;
+  }
+
+  /* 想让面板用 auth.json 里的 Key，把文件拖到面板上就行。 */
+  function readKeyFromAuthFile(text) {
+    const parsed = parseJson(text);
+    if (!parsed || typeof parsed !== "object") return "";
+    for (const name of [
+      "OPENAI_API_KEY",
+      "openai_api_key",
+      "DEEPSEEK_API_KEY",
+      "deepseek_api_key",
+      "api_key",
+    ]) {
+      if (looksLikeKey(parsed[name])) return String(parsed[name]).trim();
+    }
+    return "";
+  }
+
   function balanceEnabled() {
     return state.settings.balanceEnabled !== false;
   }
@@ -839,45 +1193,79 @@
 
   function balanceSyncText() {
     if (!balanceEnabled()) return "余额功能已关闭";
-    if (!Number(state.settings.balanceSyncAt)) {
-      return "余额助手没在跑（用量统计不受影响）";
+    if (state.settings.balanceQueryBusy) return "正在查询余额…";
+    const note = String(state.settings.balanceQueryNote || "").trim();
+    const at = Number(state.settings.balanceQueryAt) || 0;
+    if (state.settings.balanceQueryOk === true) {
+      return at ? `面板直连 · ${formatAgo(Date.now() - at)}更新` : "面板直连 · 已更新";
     }
-    if (!balanceHelperAlive()) {
-      return `余额助手 ${formatAgo(balanceSyncAge())}没动静，重启 Codex 可恢复`;
+    /* 本机如果有助手在跑，它的数据照样算数；没有就完全不提它。 */
+    if (Number(state.settings.balanceSyncAt) && balanceHelperAlive()) {
+      const used = balanceReadSourceLabel(state.settings.balanceSourceUsed);
+      if (used) return `余额来源：${used} · ${formatAgo(balanceSyncAge())}同步`;
     }
-    const note = String(state.settings.balanceSyncNote || "").trim();
-    const used = balanceReadSourceLabel(state.settings.balanceSourceUsed);
-    if (used) return `余额来源：${used} · ${formatAgo(balanceSyncAge())}同步`;
-    if (note) return note;
-    if (state.settings.balanceProxyAuth === false) {
-      return "助手已就绪，等待第一次 DeepSeek 请求（在 Codex 里发一条消息即可）";
+    if (state.settings.balanceQueryOk === false && note) return note;
+    if (!balanceKeyInfo().key) {
+      return "填一次 API Key 就能自动更新；也可以直接手动记录";
     }
-    return `本机助手正常运行 · ${formatAgo(balanceSyncAge())}同步`;
+    return "已就绪，点「刷新余额」立刻查询";
   }
 
   /*
-   * Codex 页面被 CSP 禁止联网，面板里任何 fetch 都会被拦下，所以这里不直接
-   * 请求接口，只登记一个刷新请求；随 Codex 启动的本机助手会读到它，把真实
-   * 余额回填进来（recordBalance）。
+   * 点「刷新余额」：有 Key 就直接用宿主桥查一次（面板自己完成），没有 Key
+   * 就提示去填；同一个请求标记也留着，本机如果装了助手，它会顺手补一次。
    */
   function requestBalanceRefresh({ silent = false } = {}) {
     if (!balanceEnabled()) {
       if (!silent) {
-        setBalanceStatus("余额功能已关闭，可在「说明」里打开", "warn");
+        setBalanceStatus("余额功能已关闭，可在「设置」里打开", "warn");
       }
       return false;
     }
     state.settings.balanceRequestAt = Date.now();
     scheduleSave();
-    const alive = balanceHelperAlive();
+    if (balanceKeyInfo().key) {
+      queryBalanceNow({ silent });
+      render();
+      return true;
+    }
     if (!silent) {
-      setBalanceStatus(
-        alive ? "已请求刷新，余额助手稍后回填" : "余额助手没在跑，重启 Codex 会自动带上",
-        alive ? "ok" : "warn"
-      );
+      setBalanceStatus("先填一次 API Key；也可以直接用「记录余额」手动填", "warn");
     }
     render();
-    return alive;
+    return false;
+  }
+
+  /*
+   * 自动查询：面板开着的时候每 BALANCE_QUERY_AUTO_MS 查一次，两次之间至少
+   * 隔 BALANCE_QUERY_MIN_GAP_MS，页面在后台时不查，避免无意义请求。
+   */
+  function scheduleBalanceAutoQuery() {
+    if (balanceQueryTimer) return;
+    balanceQueryTimer = window.setInterval(() => {
+      if (!balanceEnabled() || document.hidden) return;
+      if (!balanceKeyInfo().key) return;
+      if (balanceSyncAge() < BALANCE_HELPER_TIMEOUT_MS) return;
+      const last = Number(state.settings.balanceQueryAt) || 0;
+      if (Date.now() - last < BALANCE_QUERY_MIN_GAP_MS) return;
+      queryBalanceNow({ silent: true });
+    }, BALANCE_QUERY_AUTO_MS);
+  }
+
+  /*
+   * 打开面板时顺手补一次查询：没有 Key 就先试着从 Codex 配置里读一个，
+   * 读到了再查；全程静默，不会弹任何"没装助手"的提示。
+   */
+  function refreshBalanceOnOpen() {
+    if (!balanceEnabled()) return;
+    if (!balanceBridgeReady()) return;
+    const last = Number(state.settings.balanceQueryAt) || 0;
+    if (balanceKeyInfo().key) {
+      if (Date.now() - last < BALANCE_QUERY_MIN_GAP_MS) return;
+      queryBalanceNow({ silent: true });
+      return;
+    }
+    useCodexConfigKey({ silent: true });
   }
 
   function balanceSyncReport() {
@@ -897,6 +1285,15 @@
       source: balanceSourceChoice(),
       sourceUsed: state.settings.balanceSourceUsed || "",
       hasKey: state.settings.balanceKeyPresent,
+      /* 面板自己查余额的状态，供页面/自动化读取。 */
+      queryAt: Number(state.settings.balanceQueryAt) || 0,
+      queryOk: state.settings.balanceQueryOk,
+      queryBusy: state.settings.balanceQueryBusy === true,
+      queryNote: state.settings.balanceQueryNote || "",
+      querySource: state.settings.balanceQuerySource || "",
+      keyLabel: balanceKeyInfo().label,
+      keyTail: balanceKeyInfo().key ? maskKeyTail(balanceKeyInfo().key) : "",
+      bridge: balanceBridgeReady(),
       keyRequestAt: Number(state.settings.balanceKeyRequestAt) || 0,
       keyClearAt: Number(state.settings.balanceKeyClearAt) || 0,
       keySaved: state.settings.balanceKeySaved === true,
@@ -1416,7 +1813,7 @@
           <div class="dsu-card-title">
             <span>账户余额</span>
             <span class="dsu-balance-status" data-field="balanceStatus"></span>
-            <button type="button" class="dsu-text-button dsu-balance-toggle" data-action="balance-settings">说明</button>
+            <button type="button" class="dsu-text-button dsu-balance-toggle" data-action="balance-settings">设置</button>
           </div>
           <div class="dsu-balance-grid">
             <div class="dsu-balance-main">
@@ -1434,23 +1831,29 @@
             <button type="button" class="dsu-text-button" data-action="balance-fetch">刷新余额</button>
           </div>
           <div class="dsu-balance-settings" data-field="balanceSettings" hidden>
-            <p class="dsu-balance-note">余额由随 Codex 启动的本机助手读取 · <strong data-field="balanceSyncHint">检测中…</strong></p>
-            <label>余额来源
-              <select data-field="balanceSource">
-                <option value="auto">自动（先用本机代理，再直连）</option>
-                <option value="proxy">只问本机代理</option>
-                <option value="key">我填的 API Key</option>
+            <p class="dsu-balance-note">余额状态 · <strong data-field="balanceSyncHint">检测中…</strong></p>
+            <label>Key 来源
+              <select data-field="balanceKeyMode">
+                <option value="auto">自动读 Codex 配置里的 Key</option>
+                <option value="manual">只用我下面填的 Key</option>
               </select>
             </label>
             <label>API Key
-              <input data-field="balanceKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...（只在需要时填一次）">
+              <input data-field="balanceKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...（填一次就能自动更新）">
             </label>
-            <button type="button" class="dsu-text-button" data-action="balance-key-save">保存 Key</button>
-            <button type="button" class="dsu-text-button" data-action="balance-key-clear">清除本机 Key</button>
+            <div class="dsu-balance-key-actions">
+              <button type="button" class="dsu-text-button" data-action="balance-key-save">用这个 Key</button>
+              <button type="button" class="dsu-text-button" data-action="balance-key-config">读取 Codex 配置</button>
+              <button type="button" class="dsu-text-button" data-action="balance-key-clear">清除 Key</button>
+            </div>
+            <label class="dsu-balance-switch">
+              <input type="checkbox" data-field="balanceKeyRemember"> 把 Key 记在本机（重开 Codex 不用再填）
+            </label>
+            <p class="dsu-balance-note" data-field="balanceKeyState">当前 Key：未填</p>
             <label class="dsu-balance-switch">
               <input type="checkbox" data-field="balanceEnabled"> 启用余额统计
             </label>
-            <p class="dsu-balance-note">Codex 页面被安全策略禁止联网，余额只能由页面外的本机助手读取后回填。助手按上面选的来源读：自动 = 先问本机代理，读不到再用下面的 Key 直连 DeepSeek。填进面板的 Key 只经内存交给助手，用 Windows DPAPI 加密存在本机，<strong>不会写进统计、也不会随脚本上传</strong>；不需要余额可以整个关掉。点「刷新余额」可让助手立刻重读一次。</p>
+            <p class="dsu-balance-note">Codex 页面被安全策略挡着、自己不能联网，所以面板借 Codex++ 的网络桥去查 DeepSeek 余额：自动 = 读 Codex++ 里配的那把 Key（也就是 Codex 正在用的），读不到就手动填一次；手动 = 只在这台机器上，勾了「记住」才写本机存储，<strong>不会进统计、也不会随脚本上传</strong>。也可以把 Codex 的 <code>auth.json</code> 直接拖到面板上，面板会读里面的 Key。查询频率：打开面板时一次，之后每 15 分钟一次，两次之间至少隔 30 秒。</p>
             <button type="button" class="dsu-text-button dsu-danger" data-action="balance-reset">清除余额记录</button>
           </div>
           <div class="dsu-balance-table">
@@ -1820,7 +2223,7 @@
         border-radius: 8px; padding: 6px 8px; font-size: 12px;
       }
       .dsu-balance-settings {
-        display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        display: flex; flex-direction: column;
         gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #232c38;
       }
       .dsu-balance-settings[hidden] { display: none; }
@@ -1835,8 +2238,9 @@
         border-radius: 8px; padding: 6px 8px; font-size: 12px;
       }
       .dsu-balance-note { grid-column: 1 / -1; margin: 0; color: #64748b; font-size: 10px; line-height: 1.5; }
-      .dsu-balance-settings .dsu-text-button { justify-self: start; }
-      .dsu-balance-settings .dsu-balance-switch { grid-column: 1 / -1; }
+      .dsu-balance-key-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+      .dsu-balance-settings .dsu-text-button { align-self: flex-start; }
+      .dsu-balance-settings .dsu-balance-switch { display: flex; }
       .dsu-balance-settings .dsu-balance-switch input { accent-color: #38bdf8; }
       .dsu-balance-card[data-enabled="false"] .dsu-balance-grid { opacity: 0.5; }
       .dsu-balance-table { margin-top: 12px; padding-top: 10px; border-top: 1px solid #232c38; max-height: 236px; overflow: auto; }
@@ -2022,6 +2426,7 @@
     else if (action === "balance-reset") resetBalances();
     else if (action === "balance-key-save") saveBalanceKeyFromInput();
     else if (action === "balance-key-clear") clearSavedBalanceKey();
+    else if (action === "balance-key-config") useCodexConfigKey();
   }
 
   function bindPanelControls(panel) {
@@ -2054,9 +2459,16 @@
         saveBalanceKeyFromInput();
       };
     }
-    const balanceSourceSelect = panel.querySelector('[data-field="balanceSource"]');
-    if (balanceSourceSelect) {
-      balanceSourceSelect.onchange = () => setBalanceSource(balanceSourceSelect.value);
+    const balanceKeyMode = panel.querySelector('[data-field="balanceKeyMode"]');
+    if (balanceKeyMode) {
+      balanceKeyMode.onchange = () => setBalanceKeyMode(balanceKeyMode.value);
+    }
+    const balanceKeyRemember = panel.querySelector(
+      '[data-field="balanceKeyRemember"]'
+    );
+    if (balanceKeyRemember) {
+      balanceKeyRemember.onchange = () =>
+        setBalanceKeyRemember(balanceKeyRemember.checked);
     }
     const balanceEnabledBox = panel.querySelector('[data-field="balanceEnabled"]');
     if (balanceEnabledBox) {
@@ -2134,10 +2546,15 @@
       balanceSettings: panel.querySelector('[data-field="balanceSettings"]'),
       balanceSyncHint: panel.querySelector('[data-field="balanceSyncHint"]'),
       balanceCard: panel.querySelector(".dsu-balance-card"),
-      balanceSource: panel.querySelector('[data-field="balanceSource"]'),
       balanceEnabledBox: panel.querySelector('[data-field="balanceEnabled"]'),
       balanceKeyInput: panel.querySelector('[data-field="balanceKeyInput"]'),
+      balanceKeyMode: panel.querySelector('[data-field="balanceKeyMode"]'),
+      balanceKeyRemember: panel.querySelector(
+        '[data-field="balanceKeyRemember"]'
+      ),
+      balanceKeyState: panel.querySelector('[data-field="balanceKeyState"]'),
     };
+    setupBalanceKeyDrop(panel);
     restorePanelPosition(panel);
     applyPanelMinimized(panel);
     applyPanelSize(panel);
@@ -2601,6 +3018,7 @@
     render({ animate: true });
     clampPanelPosition();
     schedulePanelClamp();
+    refreshBalanceOnOpen();
   }
 
   function closePanel() {
@@ -2685,30 +3103,35 @@
   }
 
   /*
-   * 用户填的 Key 只留在页面内存：面板不能写文件，也不能联网，所以这里登记
-   * 一个请求，等随 Codex 启动的余额助手取走，用 DPAPI 加密存到本机。
+   * 用户填的 Key：默认只留在页面内存，面板拿着它自己查余额；勾了「记住」
+   * 才写本机 localStorage（脚本本身永远不含任何 Key）。同时登记一个请求，
+   * 本机如果装了助手，它会顺手把 Key 用 DPAPI 再存一份。
    */
   function rememberBalanceKey(value, { announce = true } = {}) {
     const key = String(value ?? "").trim();
-    if (!/^sk-[A-Za-z0-9_-]{8,}$/.test(key)) {
+    if (!looksLikeKey(key)) {
       if (announce) setBalanceStatus("Key 看着不对（应以 sk- 开头）", "warn");
       return false;
     }
+    panelBalanceKey = key;
     pendingBalanceKey = key;
     state.settings.balanceKeyRequestAt = Date.now();
     state.settings.balanceRequestAt = state.settings.balanceKeyRequestAt;
     state.settings.balanceSource = "key";
+    state.settings.balanceKeyMode = "manual";
+    state.settings.balanceKeyPresent = true;
+    writeBalanceStoredKey(state.settings.balanceKeyRemember ? key : "");
     scheduleSave();
     render();
     if (announce) {
-      const alive = balanceHelperAlive();
       setBalanceStatus(
-        alive
-          ? "Key 已交给余额助手保存，稍等回填"
-          : "Key 暂存在面板内存里，重启 Codex 后助手会取走保存",
-        alive ? "ok" : "warn"
+        state.settings.balanceKeyRemember
+          ? `Key 已记住（${maskKeyTail(key)}），正在查询余额…`
+          : `Key 只在本次运行有效（${maskKeyTail(key)}），正在查询余额…`,
+        "ok"
       );
     }
+    queryBalanceNow({ silent: true });
     return true;
   }
 
@@ -2723,17 +3146,81 @@
   }
 
   function clearSavedBalanceKey() {
+    panelBalanceKey = "";
+    balanceConfigKey = "";
+    balanceAuthKey = "";
     pendingBalanceKey = "";
+    writeBalanceStoredKey("");
     state.settings.balanceKeyClearAt = Date.now();
     state.settings.balanceKeySaved = false;
     state.settings.balanceKeyPresent = null;
+    state.settings.balanceKeyFromConfig = false;
+    state.settings.balanceQueryOk = null;
+    state.settings.balanceQueryAt = 0;
+    state.settings.balanceQueryNote = "";
     scheduleSave();
     render();
-    const alive = balanceHelperAlive();
+    setBalanceStatus("Key 已清除（手动记录的余额不受影响）", "ok");
+  }
+
+  function setBalanceKeyMode(value) {
+    const mode = value === "manual" ? "manual" : "auto";
+    state.settings.balanceKeyMode = mode;
+    scheduleSave();
+    render();
+    if (mode === "auto") {
+      setBalanceStatus("已切到自动：先读 Codex 配置里的 Key", "ok");
+      useCodexConfigKey();
+    } else {
+      setBalanceStatus("已切到手动：用下面填的 Key", "ok");
+    }
+  }
+
+  function setBalanceKeyRemember(remember) {
+    state.settings.balanceKeyRemember = remember === true;
+    const key = panelBalanceKey || balanceKeyInfo().key;
+    writeBalanceStoredKey(state.settings.balanceKeyRemember ? key : "");
+    scheduleSave();
+    render();
     setBalanceStatus(
-      alive ? "已请求清除本机保存的 Key" : "余额助手没在跑，重启 Codex 后清除",
-      alive ? "ok" : "warn"
+      state.settings.balanceKeyRemember
+        ? "Key 会记在这台机器上（存在面板自己的本机存储里）"
+        : "Key 不会写入本机存储，重开 Codex 需要重新填",
+      "ok"
     );
+  }
+
+  /* 把 auth.json 拖到面板上就能读里面的 Key，省得手动找文件。 */
+  function setupBalanceKeyDrop(panel) {
+    if (!panel || panel.__deepseekUsageDropBound === VERSION) return;
+    panel.__deepseekUsageDropBound = VERSION;
+    panel.addEventListener("dragover", (event) => {
+      if (!event.dataTransfer) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    });
+    panel.addEventListener("drop", (event) => {
+      const file = event.dataTransfer?.files?.[0];
+      if (!file) return;
+      event.preventDefault();
+      event.stopPropagation();
+      file
+        .text()
+        .then((text) => {
+          const key = readKeyFromAuthFile(text);
+          if (!key) {
+            setBalanceStatus("这个文件里没找到 Key（需要 Codex 的 auth.json）", "warn");
+            return;
+          }
+          balanceAuthKey = key;
+          state.settings.balanceKeyMode = "auto";
+          scheduleSave();
+          render();
+          setBalanceStatus(`已从 ${file.name} 读到 Key（${maskKeyTail(key)}）`, "ok");
+          queryBalanceNow({ silent: true });
+        })
+        .catch(() => setBalanceStatus("读不了这个文件", "warn"));
+    });
   }
 
   function setBalanceSource(value) {
@@ -3052,8 +3539,8 @@
         latest
           ? `${formatDateTime(latest.t)} · ${balanceSourceLabel(latest.s)}`
           : !balanceEnabled()
-            ? "余额功能已关闭（点上方「说明」可打开）"
-            : state.settings.balanceSyncNote || balanceSyncText()
+            ? "余额功能已关闭（点上方「设置」可打开）"
+            : balanceSyncText()
       );
       setText(
         "balanceToday",
@@ -3097,15 +3584,28 @@
       if (state.ui.balanceSyncHint) {
         const hint = balanceSyncText();
         state.ui.balanceSyncHint.textContent = hint;
-        state.ui.balanceSyncHint.dataset.tone = balanceHelperAlive()
-          ? "ok"
-          : "warn";
+        const healthy =
+          state.settings.balanceQueryOk === true ||
+          (state.settings.balanceQueryOk === null && balanceHelperAlive());
+        state.ui.balanceSyncHint.dataset.tone = healthy ? "ok" : "warn";
       }
       if (state.ui.balanceSettings) {
         state.ui.balanceSettings.hidden = !state.settings.balanceSettingsOpen;
       }
-      if (state.ui.balanceSource) {
-        state.ui.balanceSource.value = balanceSourceChoice();
+      if (state.ui.balanceKeyMode) {
+        state.ui.balanceKeyMode.value =
+          state.settings.balanceKeyMode === "manual" ? "manual" : "auto";
+      }
+      if (state.ui.balanceKeyRemember) {
+        state.ui.balanceKeyRemember.checked =
+          state.settings.balanceKeyRemember === true;
+      }
+      if (state.ui.balanceKeyState) {
+        const info = balanceKeyInfo();
+        const bridge = balanceBridgeReady() ? "" : " · 网络桥不可用";
+        state.ui.balanceKeyState.textContent = info.key
+          ? `当前 Key：${info.label} · ${maskKeyTail(info.key)}${bridge}`
+          : `当前 Key：未填${bridge}`;
       }
       if (state.ui.balanceEnabledBox) {
         state.ui.balanceEnabledBox.checked = balanceEnabled();
@@ -3344,16 +3844,12 @@
     });
     updateLauncherBadge();
     /*
-     * 面板自己不能联网，余额靠随 Codex 启动的本机助手回填。这里只在助手还
-     * 在线、而且今天还没有任何余额快照时，补记一次刷新请求。
+     * 余额由面板自己查：启动时如果已经有 Key（本机记住的 / Codex 配置里的），
+     * 静默补一次，之后每 15 分钟一次。没有 Key 就先从 Codex 配置里读一个，
+     * 全程不弹提示，也不要求装任何助手。
      */
-    if (
-      balanceEnabled() &&
-      balanceHelperAlive() &&
-      !state.balances.some((item) => item.d === todayKey())
-    ) {
-      requestBalanceRefresh({ silent: true });
-    }
+    scheduleBalanceAutoQuery();
+    window.setTimeout(() => refreshBalanceOnOpen(), 1500);
   }
 
   loadState();
@@ -3430,6 +3926,7 @@
           options?.currency ||
           state.settings.balanceCurrency ||
           "CNY",
+        timestamp: Number(options?.timestamp) || Date.now(),
       }),
     /* 本机助手用这两个接口做心跳和推送确认。 */
     getBalanceSync: () => balanceSyncReport(),
@@ -3448,6 +3945,21 @@
       return key;
     },
     clearBalanceKey: () => clearSavedBalanceKey(),
+    /* 面板自己查余额用的入口，页面上/自动化都能调。 */
+    queryBalance: (options) => queryBalanceNow(options || {}),
+    useCodexConfigKey: (options) => useCodexConfigKey(options || {}),
+    getBalanceKeyState: () => {
+      const info = balanceKeyInfo();
+      return {
+        hasKey: Boolean(info.key),
+        label: info.label,
+        tail: info.key ? maskKeyTail(info.key) : "",
+        mode: state.settings.balanceKeyMode === "manual" ? "manual" : "auto",
+        remember: state.settings.balanceKeyRemember === true,
+        bridge: balanceBridgeReady(),
+      };
+    },
+    setBalanceKeyMode: (value) => setBalanceKeyMode(value),
     setBalanceEnabled: (enabled) => toggleBalanceEnabled(enabled),
     setBalanceSource: (value) => setBalanceSource(value),
   };
