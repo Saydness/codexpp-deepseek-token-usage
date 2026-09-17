@@ -61,6 +61,15 @@ codexpp\deepseek-token-usage.user.js
 
 如果文件中已有其他脚本，请保留原有条目，只增加上面这一项。
 
+## 采集范围（读了什么、不读什么）
+
+面板只观察、不改写：包装 `fetch` / `XMLHttpRequest` / `WebSocket` 只为读响应正文里的那几个统计字段，请求和响应都原样放行。会去读正文的请求只有两类：
+
+1. 主机名里带 `deepseek` 的地址（例如 `api.deepseek.com`）；
+2. 路径落在 OpenAI 兼容的 completions 端点上：`/chat/completions`、`/completions`、`/beta/chat/completions`（本地中转、自建代理走的就是这个路径）。
+
+除此之外的响应一律不读、不解析，包括 `127.0.0.1` 上其它服务的接口、`/responses`（OpenAI Responses API）和页面自身的接口。读到的内容只用来提取模型名、token 数量和时间戳。
+
 ## 账户余额（可选）
 
 「账户余额」卡片显示当前余额、今日消耗、昨日消耗、本月消耗，以及每天的收盘余额 / 余额消耗 / 费率估算对照表。余额由**面板自己查**，不需要额外装任何随 Codex 启动的助手程序：

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.17.2
+// @version      1.17.3
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-const VERSION = "1.17.2";
+const VERSION = "1.17.3";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -1568,23 +1568,40 @@ const VERSION = "1.17.2";
     return captured;
   }
 
-  function isLikelyApiUrl(url) {
-    const value = String(url || "").toLowerCase();
-    return (
-      value.includes("deepseek") ||
-      isLoopbackUrl(value) ||
-      value.includes("/responses") ||
-      value.includes("/chat/completions") ||
-      value.includes("/completions")
-    );
+  /*
+   * 只取这两类响应的正文：
+   *   1. 主机名里带 deepseek 的地址（api.deepseek.com 等）；
+   *   2. 路径落在 OpenAI 兼容的 completions 端点上的地址——本地中转、自建代理
+   *      走的就是这个路径，DeepSeek 的响应形状和 OpenAI 一致。
+   * 早先还匹配「任何回环地址」和「/responses」，那会把本机其它服务、别的 provider
+   * 的响应也读一遍，范围过宽，已经去掉：本脚本只解析上面这两类请求。
+   */
+  const API_PATH_SUFFIXES = [
+    "/chat/completions",
+    "/completions",
+    "/beta/chat/completions",
+  ];
+
+  function splitUrl(value) {
+    const text = String(value || "").trim();
+    if (!text) return { host: "", path: "" };
+    try {
+      const parsed = new URL(text, window.location?.href || undefined);
+      return {
+        host: String(parsed.hostname || "").toLowerCase(),
+        path: String(parsed.pathname || "").toLowerCase(),
+      };
+    } catch (_) {
+      /* 相对路径解析不了时按整体字符串判断，够用。 */
+      return { host: "", path: text.toLowerCase().split("?")[0] };
+    }
   }
 
-  function isLoopbackUrl(value) {
-    return (
-      value.includes("127.0.0.1") ||
-      value.includes("localhost") ||
-      value.includes("[::1]")
-    );
+  function isLikelyApiUrl(url) {
+    const { host, path } = splitUrl(url);
+    if (!host && !path) return false;
+    if (host.includes("deepseek")) return true;
+    return API_PATH_SUFFIXES.some((suffix) => path.endsWith(suffix));
   }
 
   function installFetchObserver() {
