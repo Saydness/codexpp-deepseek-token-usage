@@ -63,12 +63,16 @@ codexpp\deepseek-token-usage.user.js
 
 ## 采集范围（读了什么、不读什么）
 
-面板只观察、不改写：包装 `fetch` / `XMLHttpRequest` / `WebSocket` 只为读响应正文里的那几个统计字段，请求和响应都原样放行。会去读正文的请求只有两类：
+面板只观察、不改写：包装 `fetch` / `XMLHttpRequest` / `WebSocket` 只为读统计字段，请求和响应都原样放行。判定按「这次调用是不是 DeepSeek 的」来做，会去读正文的只有两类：
 
-1. 主机名里带 `deepseek` 的地址（例如 `api.deepseek.com`）；
-2. 路径落在 OpenAI 兼容的 completions 端点上：`/chat/completions`、`/completions`、`/beta/chat/completions`（本地中转、自建代理走的就是这个路径）。
+| 读 | 条件 |
+| --- | --- |
+| ✅ | 主机名里带 `deepseek` 的地址（例如 `api.deepseek.com`） |
+| ✅ | 路径是 OpenAI 兼容的 completions 端点（`/chat/completions`、`/completions`、`/beta/chat/completions`），**并且请求体里点名了 deepseek 模型**——本地中转、自建代理走的就是这个路径，靠模型名认归属 |
 
-除此之外的响应一律不读、不解析，包括 `127.0.0.1` 上其它服务的接口、`/responses`（OpenAI Responses API）和页面自身的接口。读到的内容只用来提取模型名、token 数量和时间戳。
+明确不读的：`127.0.0.1`（或任何主机）上非 completions 路径的接口、`/responses`（OpenAI Responses API）、发给其它模型（例如 `gpt-*`）的 completions 调用、以及从没出现 deepseek 模型名的 WebSocket 连接。WebSocket 首帧认出归属后，同一条连接的后续帧继续解析（流式分片通常只有首帧带模型名，否则会漏掉末尾的 usage），其余连接一帧都不读。读到的内容只用来提取模型名、token 数量和时间戳，请求体只做一次「有没有 deepseek」的子串判断，不保存。
+
+另外，面板还会监听 Codex 页面自身发出的消息事件（`postMessage` / `codex-message-from-view`），从中只取 token 用量、模型、时间戳这些字段——这部分不涉及任何 HTTP 响应。
 
 ## 账户余额（可选）
 

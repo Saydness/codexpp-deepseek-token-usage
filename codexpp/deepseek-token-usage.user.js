@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.17.3
+// @version      1.17.4
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-const VERSION = "1.17.3";
+const VERSION = "1.17.4";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -1569,18 +1569,20 @@ const VERSION = "1.17.3";
   }
 
   /*
-   * 只取这两类响应的正文：
+   * 响应正文的读取范围（只读这些，别的都不读）：
    *   1. 主机名里带 deepseek 的地址（api.deepseek.com 等）；
-   *   2. 路径落在 OpenAI 兼容的 completions 端点上的地址——本地中转、自建代理
-   *      走的就是这个路径，DeepSeek 的响应形状和 OpenAI 一致。
+   *   2. 路径是 OpenAI 兼容 completions 端点、并且**请求里点名了 deepseek 模型**
+   *      的地址——本机中转、自建代理走的就是这个路径，靠请求体里的模型名认归属。
    * 早先还匹配「任何回环地址」和「/responses」，那会把本机其它服务、别的 provider
-   * 的响应也读一遍，范围过宽，已经去掉：本脚本只解析上面这两类请求。
+   * 的响应也读一遍，范围过宽，已经去掉。
    */
   const API_PATH_SUFFIXES = [
     "/chat/completions",
     "/completions",
     "/beta/chat/completions",
   ];
+  /* 请求体可能很大（含提示词），只做一次子串判断，不保存任何内容。 */
+  const REQUEST_BODY_SCAN_LIMIT = 200_000;
 
   function splitUrl(value) {
     const text = String(value || "").trim();
@@ -1597,11 +1599,43 @@ const VERSION = "1.17.3";
     }
   }
 
-  function isLikelyApiUrl(url) {
+  function mentionsDeepSeek(value) {
+    if (typeof value !== "string" || !value) return false;
+    const text =
+      value.length > REQUEST_BODY_SCAN_LIMIT
+        ? value.slice(0, REQUEST_BODY_SCAN_LIMIT)
+        : value;
+    return text.toLowerCase().includes("deepseek");
+  }
+
+  function isDeepSeekHost(host) {
+    return String(host || "").includes("deepseek");
+  }
+
+  /*
+   * requestMentionsDeepSeek：这次请求的请求体里有没有点名 deepseek 模型。
+   * 非 deepseek 域名（本机中转、自建代理）只有拿到这个 true 才读响应。
+   */
+  function isLikelyApiUrl(url, requestMentionsDeepSeek = false) {
     const { host, path } = splitUrl(url);
     if (!host && !path) return false;
-    if (host.includes("deepseek")) return true;
-    return API_PATH_SUFFIXES.some((suffix) => path.endsWith(suffix));
+    if (isDeepSeekHost(host)) return true;
+    if (!API_PATH_SUFFIXES.some((suffix) => path.endsWith(suffix))) return false;
+    return requestMentionsDeepSeek === true;
+  }
+
+  /*
+   * WebSocket 侧的归属判断：流式分片通常只有首帧带模型名，所以「首帧认出归属、
+   * 这条连接的后续帧继续解析」，末尾那条带 usage 的帧才不会漏掉；
+   * 而一条从头到尾没提过 deepseek 的连接，一帧都不碰。
+   */
+  const deepSeekSockets = new WeakSet();
+
+  function isDeepSeekSocketFrame(socket, text) {
+    if (deepSeekSockets.has(socket)) return true;
+    if (!mentionsDeepSeek(text)) return false;
+    deepSeekSockets.add(socket);
+    return true;
   }
 
   function installFetchObserver() {
@@ -1618,9 +1652,10 @@ const VERSION = "1.17.3";
           ? input
           : input?.url || "";
       captureModelFromText(init?.body);
+      const deepSeekRequest = mentionsDeepSeek(init?.body);
       const response = await originalFetch.call(this, input, init);
       if (
-        isLikelyApiUrl(url) &&
+        isLikelyApiUrl(url, deepSeekRequest) &&
         response?.clone &&
         typeof response.clone === "function"
       ) {
@@ -1653,9 +1688,11 @@ const VERSION = "1.17.3";
     };
     Xhr.prototype.send = function send(...args) {
       captureModelFromText(args[0]);
+      /* 先算成布尔值，避免把请求体（含提示词）留到回调里。 */
+      const deepSeekRequest = mentionsDeepSeek(args[0]);
       this.addEventListener?.("loadend", () => {
         const url = this.__deepseekUsageUrl || "";
-        if (!isLikelyApiUrl(url)) return;
+        if (!isLikelyApiUrl(url, deepSeekRequest)) return;
         try {
           parseResponseText(this.responseText || "", "xhr", url);
         } catch (_) {
@@ -1682,6 +1719,7 @@ const VERSION = "1.17.3";
       socket.addEventListener?.("message", (event) => {
         try {
           if (typeof event.data === "string") {
+            if (!isDeepSeekSocketFrame(socket, event.data)) return;
             captureModelFromText(event.data);
             handlePayload(event.data, "websocket");
           } else if (
@@ -1690,7 +1728,10 @@ const VERSION = "1.17.3";
           ) {
             event.data
               .text()
-              .then((text) => handlePayload(text, "websocket"))
+              .then((text) => {
+                if (!isDeepSeekSocketFrame(socket, text)) return;
+                handlePayload(text, "websocket");
+              })
               .catch(() => {});
           }
         } catch (_) {
