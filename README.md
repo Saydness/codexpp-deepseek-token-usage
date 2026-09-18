@@ -29,9 +29,19 @@ macOS 用 sh / curl。安装脚本会先检查这台机器：现成的 Node.js �
 
 ## 安装
 
-下载或克隆本仓库后，在仓库根目录执行：
+**方式一：下载打包好的压缩包（推荐）**
+
+打开 [Releases](https://github.com/Saydness/codexpp-deepseek-token-usage/releases/latest) 页，下载 `deepseek-token-usage-x.y.z.zip`，解压后在该目录执行：
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+**方式二：克隆仓库**
+
+```powershell
+git clone https://github.com/Saydness/codexpp-deepseek-token-usage.git
+cd codexpp-deepseek-token-usage
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
@@ -41,7 +51,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 ## 手动安装
 
-如果不想运行安装脚本，可以手动复制：
+如果不想运行安装脚本：Releases 页里可以单独下载 `deepseek-token-usage.user.js`；也可以手动复制仓库里的：
 
 ```text
 codexpp\deepseek-token-usage.user.js
