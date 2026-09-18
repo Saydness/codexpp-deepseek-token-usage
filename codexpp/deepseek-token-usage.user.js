@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.19.7
+// @version      1.19.8
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -4084,6 +4084,61 @@ const VERSION = "1.19.7";
     });
   }
 
+  /*
+   * 图表细节辅助：圆角柱、平滑曲线、圆角数值小标——只负责画，不碰数据。
+   */
+  function chartRoundRect(context, x, y, width, height, radius, bottomRadius) {
+    const top = Math.max(0, Math.min(radius, width / 2, height));
+    const bottom = Math.max(
+      0,
+      Math.min(
+        bottomRadius === undefined ? radius : bottomRadius,
+        width / 2,
+        height - top
+      )
+    );
+    context.beginPath();
+    context.moveTo(x, y + height - bottom);
+    context.arcTo(x, y + height, x + bottom, y + height, bottom);
+    context.lineTo(x + width - bottom, y + height);
+    context.arcTo(x + width, y + height, x + width, y + height - bottom, bottom);
+    context.lineTo(x + width, y + top);
+    context.arcTo(x + width, y, x + width - top, y, top);
+    context.lineTo(x + top, y);
+    context.arcTo(x, y, x, y + top, top);
+    context.closePath();
+  }
+
+  function chartSmoothPath(context, points) {
+    context.moveTo(points[0].x, points[0].y);
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const current = points[index];
+      const next = points[index + 1];
+      const middle = (current.x + next.x) / 2;
+      context.bezierCurveTo(middle, current.y, middle, next.y, next.x, next.y);
+    }
+  }
+
+  function chartPill(context, x, y, text, background, color, align, limit) {
+    context.font = "bold 10px Segoe UI, sans-serif";
+    const pillWidth = context.measureText(text).width + 14;
+    let left =
+      align === "right"
+        ? x - pillWidth
+        : align === "center"
+          ? x - pillWidth / 2
+          : x;
+    if (Number.isFinite(limit)) left = Math.min(left, limit - pillWidth);
+    left = Math.max(4, left);
+    chartRoundRect(context, left, y, pillWidth, 15, 7);
+    context.fillStyle = background;
+    context.fill();
+    context.fillStyle = color;
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(text, left + pillWidth / 2, y + 7.6);
+  }
+
   function drawChart(buckets, animate = false) {
     const canvas = state.ui?.chart;
     if (!canvas) return;
@@ -4116,7 +4171,7 @@ const VERSION = "1.19.7";
     );
     const maxCost = Math.max(0.000001, ...buckets.map((item) => item.cost));
     const step = chartWidth / buckets.length;
-    const barWidth = Math.max(4, Math.min(22, step * 0.58));
+    const barWidth = Math.max(5, Math.min(26, step * 0.68));
     const colors = {
       hit: "#38bdf8",
       miss: "#fb923c",
@@ -4153,18 +4208,47 @@ const VERSION = "1.19.7";
         width: step,
         item,
       });
-      let y = padding.top + chartHeight;
       const values = [
         [item.hit, colors.hit],
         [item.miss, colors.miss],
         [item.output, colors.output],
       ];
-      for (const [value, color] of values) {
-        const barHeight = (chartHeight * value) / maxTokens;
-        if (barHeight <= 0) continue;
-        y -= barHeight;
-        context.fillStyle = color;
-        context.fillRect(x - barWidth / 2, y, barWidth, barHeight);
+      const barTotal = item.hit + item.miss + item.output;
+      if (barTotal > 0) {
+        /*
+         * 圆角画在整根柱子上：先用圆角矩形当裁剪区，再在里面堆命中/未命中/输出。
+         * 只磨圆顶端两角、柱脚保持直角，这样顶部圆角不会被细小分段盖没。
+         */
+        const barHeight = (chartHeight * barTotal) / maxTokens;
+        const barTop = padding.top + chartHeight - barHeight;
+        const barRadius = Math.min(5, barWidth * 0.3);
+        context.save();
+        chartRoundRect(
+          context,
+          x - barWidth / 2,
+          barTop,
+          barWidth,
+          barHeight,
+          barRadius,
+          0
+        );
+        context.clip();
+        let y = padding.top + chartHeight;
+        values.forEach(([value, color], segmentIndex) => {
+          const segmentHeight = (chartHeight * value) / maxTokens;
+          if (segmentHeight <= 0) return;
+          y -= segmentHeight;
+          if (segmentIndex === 0) {
+            const barGradient = context.createLinearGradient(0, y, 0, y + segmentHeight);
+            barGradient.addColorStop(0, "#4cc3fb");
+            barGradient.addColorStop(1, "#2b8fc9");
+            context.fillStyle = barGradient;
+          } else {
+            context.fillStyle = color;
+          }
+          context.fillRect(x - barWidth / 2, y, barWidth, segmentHeight);
+        });
+        context.restore();
       }
       if (index % labelEvery === 0 || index === buckets.length - 1) {
         context.fillStyle = colors.text;
@@ -4174,23 +4258,42 @@ const VERSION = "1.19.7";
       }
     });
 
-    context.strokeStyle = colors.cost;
-    context.lineWidth = 1.6;
+    const costPoints = buckets.map((item, index) => ({
+      x: padding.left + index * step + step / 2,
+      y: padding.top + chartHeight - (chartHeight * item.cost) / maxCost,
+    }));
+    const costGradient = context.createLinearGradient(
+      0,
+      padding.top,
+      0,
+      padding.top + chartHeight
+    );
+    costGradient.addColorStop(0, "rgba(250, 204, 21, 0.14)");
+    costGradient.addColorStop(1, "rgba(250, 204, 21, 0)");
     context.beginPath();
-    buckets.forEach((item, index) => {
-      const x = padding.left + index * step + step / 2;
-      const y = padding.top + chartHeight - (chartHeight * item.cost) / maxCost;
-      if (index === 0) context.moveTo(x, y);
-      else context.lineTo(x, y);
-    });
+    chartSmoothPath(context, costPoints);
+    context.lineTo(costPoints[costPoints.length - 1].x, padding.top + chartHeight);
+    context.lineTo(costPoints[0].x, padding.top + chartHeight);
+    context.closePath();
+    context.fillStyle = costGradient;
+    context.fill();
+    context.beginPath();
+    chartSmoothPath(context, costPoints);
+    context.strokeStyle = colors.cost;
+    context.lineWidth = 1.8;
     context.stroke();
-    context.fillStyle = colors.cost;
     buckets.forEach((item, index) => {
-      const x = padding.left + index * step + step / 2;
-      const y = padding.top + chartHeight - (chartHeight * item.cost) / maxCost;
+      if (item.cost <= 0) return;
+      const point = costPoints[index];
       context.beginPath();
-      context.arc(x, y, 2.2, 0, Math.PI * 2);
+      context.arc(point.x, point.y, 2.6, 0, Math.PI * 2);
+      context.fillStyle = colors.cost;
       context.fill();
+      context.beginPath();
+      context.arc(point.x, point.y, 2.6, 0, Math.PI * 2);
+      context.strokeStyle = "#10161f";
+      context.lineWidth = 1;
+      context.stroke();
     });
 
     context.textAlign = "left";
@@ -4202,6 +4305,45 @@ const VERSION = "1.19.7";
         formatCost((maxCost * index) / 2),
         padding.left + chartWidth + 8,
         y
+      );
+    }
+    /* 峰值自动标注：最高的一柱写总量，费用最高的那点写金额，省得每次去悬停。 */
+    let peakIndex = 0;
+    let costPeakIndex = 0;
+    buckets.forEach((item, index) => {
+      const total = item.hit + item.miss + item.output;
+      const peakItem = buckets[peakIndex];
+      if (total > peakItem.hit + peakItem.miss + peakItem.output) peakIndex = index;
+      if (item.cost > buckets[costPeakIndex].cost) costPeakIndex = index;
+    });
+    const peakItem = buckets[peakIndex];
+    const peakTotal = peakItem.hit + peakItem.miss + peakItem.output;
+    if (peakTotal > 0) {
+      const peakX = padding.left + peakIndex * step + step / 2;
+      const peakY = padding.top + chartHeight - (chartHeight * peakTotal) / maxTokens;
+      chartPill(
+        context,
+        Math.max(padding.left + 10, Math.min(peakX, width - 10)),
+        Math.max(4, peakY - 21),
+        formatTokens(peakTotal),
+        "#1c2735",
+        "#e8eaed",
+        "center",
+        width - 4
+      );
+    }
+    const costPeak = buckets[costPeakIndex];
+    if (costPeak.cost > 0) {
+      const point = costPoints[costPeakIndex];
+      chartPill(
+        context,
+        point.x + 14,
+        Math.max(4, point.y - 5),
+        formatCost(costPeak.cost),
+        "#2a2410",
+        colors.cost,
+        "left",
+        width - 4
       );
     }
   }
