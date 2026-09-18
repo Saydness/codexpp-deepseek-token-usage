@@ -31,10 +31,16 @@ macOS 用 sh / curl。安装脚本会先检查这台机器：现成的 Node.js �
 
 **方式一：下载打包好的压缩包（推荐）**
 
-打开 [Releases](https://github.com/Saydness/codexpp-deepseek-token-usage/releases/latest) 页，下载 `deepseek-token-usage-x.y.z.zip`，解压后在该目录执行：
+打开 [Releases](https://github.com/Saydness/codexpp-deepseek-token-usage/releases/latest) 页，下载 `deepseek-token-usage-x.y.z.zip`，解压后在该目录执行对应的一条：
 
 ```powershell
+# Windows
 powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+```bash
+# macOS
+bash install.sh
 ```
 
 **方式二：克隆仓库**
@@ -42,7 +48,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```powershell
 git clone https://github.com/Saydness/codexpp-deepseek-token-usage.git
 cd codexpp-deepseek-token-usage
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1   # Windows
+bash install.sh                                          # macOS
 ```
 
 安装完成后重启 Codex / ChatGPT 桌面端。
@@ -57,13 +64,14 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 codexpp\deepseek-token-usage.user.js
 ```
 
-到：
+到下面这个位置（Windows / macOS）：
 
 ```text
-%APPDATA%\Codex++\user_scripts\deepseek-token-usage.js
+Windows : %APPDATA%\Codex++\user_scripts\deepseek-token-usage.js
+macOS   : ~/Library/Application Support/Codex++/user_scripts/deepseek-token-usage.js
 ```
 
-然后在 `%APPDATA%\Codex++\user_scripts.json` 中加入：
+然后在同一层的 `Codex++` 目录里，往 `user_scripts.json` 加入：
 
 ```json
 {
