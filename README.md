@@ -13,14 +13,17 @@
 - 面板四边和四个角都可以拖动缩放，位置和大小会记住；
 - 可收起成仅显示 token 用量和费用的 mini 状态条；
 - 每次 Codex 启动后的第一次打开都显示完整面板，之后才记住你自己收起的 mini 状态；
-- 可选：账户余额、每日收盘余额与余额消耗（面板自己查，不需要额外装助手，见下）。
+- 可选：账户余额、每日收盘余额与余额消耗（面板本身不依赖助手；想让余额全自动更新，可以用面板里的一键命令装个小助手，见下）。
 
 ## 环境要求
 
-- Windows
-- 已安装 Codex++ 和 Codex 桌面端
+- 已安装 Codex++ 和 Codex 桌面端（Codex++ 目前发布的安装包：Windows x64、macOS x64、macOS arm64）；
+- 面板是 Codex++ 用户脚本，本身不挑系统和 CPU 架构：Windows（x64 / ARM64）、macOS（Intel / Apple 芯片）、Linux 与 WSL 都能跑；
 
 面板本身是 Codex++ 用户脚本，不需要 Python 或 Node.js，也不直接联网：查余额时只借用 Codex++ 自己的网络桥发一次请求。
+
+只有下面那个**可选**的本机助手需要 Node.js 18 以上，它的安装脚本在三种系统上都备好了
+（Windows 的 PowerShell / wscript、macOS 与 Linux 的 sh / curl），node 装在哪由脚本自己找。
 
 ## 安装
 
@@ -81,6 +84,7 @@ codexpp\deepseek-token-usage.user.js
 **手动填 Key 查询余额的那条通道一直在面板上**，收起来的只有那个点了必然失败的「刷新余额」按钮：Codex 页面被安全策略挡住（CSP 禁止联网，实测 `fetch` 直接报 `Failed to fetch`），只能借 Codex++ 的网络桥出去，而那条桥目前只放行 **POST**（实测报 `LLM Bridge 仅支持 POST 请求`），DeepSeek 查余额的接口只认 **GET**（实测 POST 打过去是 HTTP 405）。所以按钮先从界面上撤掉，实现代码一行没删——把脚本里的 `BRIDGE_BALANCE_QUERY_ENABLED` 改回 `true` 就会整体恢复。Key 设置区（Key 来源、API Key 输入、用这个 Key / 读取 Codex 配置 / 清除 Key、把 Key 记在本机）始终可见可用，填过的 Key 会留着，等桥放开 GET 时自动查询直接接上。
 
 面板不依赖任何助手程序：要更新余额数字，在卡片上填一次当前余额点「记录余额」就行。
+装了下面的本机助手之后，卡片上的「刷新余额」会重新出现（点了它立刻重读一次），余额也会每 5 分钟自动更新一次。
 
 下面是桥放开 GET 后生效的那套 Key 来源：
 
@@ -105,18 +109,53 @@ Key 来源就这两条。**1.17.9 起删掉了原来的「拖入 auth.json」**�
 helper/
 ├─ dstu-helper.mjs       # 本体：定时读余额、把数字推给面板
 ├─ balance_sources.mjs   # 余额来源解析
-├─ set_balance_key.ps1   # 用 Windows DPAPI 保存 / 查看 / 清除 Key
-├─ start-helper.vbs      # 随 Codex 启停的看门狗
+├─ set_balance_key.ps1   # Windows：用 DPAPI 保存 / 查看 / 清除 Key
+├─ install-helper.ps1    # Windows：一键安装 / 卸载（PowerShell）
+├─ start-helper.vbs      # Windows：随 Codex 启停的看门狗
+├─ install-helper.sh     # macOS / Linux：一键安装 / 卸载
+├─ start-helper.sh       # macOS / Linux：随 Codex 启停的看门狗
 └─ README.md
 ```
 
-需要 Node.js 18 以上，手动启动：
+需要 Node.js 18 以上。**一键安装**（面板「设置 → 本机助手」里点「复制安装命令」就能拿到，
+命令按当前系统给，也可以手动切换系统）：
 
-```powershell
-node helper\dstu-helper.mjs
+```text
+# 下载了仓库：在仓库根目录执行
+Windows    : powershell -NoProfile -ExecutionPolicy Bypass -File .\helper\install-helper.ps1
+macOS/Linux: bash helper/install-helper.sh
+
+# 没下载仓库：把面板复制到的那条粘进系统终端回车即可
+Windows（PowerShell）: irm …/helper/install-helper.ps1 -OutFile $env:TEMP\dstu-helper-install.ps1; & $env:TEMP\dstu-helper-install.ps1
+macOS / Linux（终端）: curl -fsSL …/helper/install-helper.sh | bash
 ```
 
-想让它跟着 Codex 自动启停，把 `helper\start-helper.vbs` 的快捷方式放进 `shell:startup`：Codex 启动时它才去读余额，Codex 退出后助手一起停，平时不占资源。
+Windows 上也可以直接双击 `helper\安装本机助手.cmd`，macOS 上双击 `helper\安装本机助手.command`。
+安装脚本会把文件放到本机目录、登记开机自启，并立刻拉起看门狗：Codex 启动时它才去读余额，
+Codex 退出后助手一起停，平时不占资源；卸载加 `-Uninstall` 即可还原。
+
+#### 支持的系统与架构
+
+| 系统 | 架构 | 装法与说明 |
+| --- | --- | --- |
+| Windows | x64 | PowerShell 一键安装；用「启动」文件夹里的快捷方式自启 |
+| Windows | ARM64（骁龙本等） | 同一套命令：Codex++ 本体是 x64 程序，走系统兼容层；助手是脚本 + Node，原生 ARM64 版 node 也照用 |
+| macOS | Apple 芯片（arm64） | 同一套 sh 脚本；Homebrew 的 `/opt/homebrew` 前缀也认 |
+| macOS | Intel（x86_64） | 同一套 sh 脚本；Homebrew `/usr/local`、MacPorts `/opt/local` 都认 |
+| Linux | x86_64 / ARM64 / armv7 | 同一套 sh 脚本；自启动优先 systemd 用户服务，没有 systemd 就退回桌面自启动 |
+| WSL | x86_64 / ARM64 | 走 Linux 分支 |
+
+node 的位置是自动找的：PATH、两套 Homebrew 前缀、MacPorts、snap、nix，以及
+nvm / fnm / volta / asdf / nodenv / nvm-windows / Scoop / Chocolatey 这些装法都会去找。
+`install-helper.sh -Status`（Windows 用 `install-helper.ps1 -Status`）会把「系统架构」和
+「node 架构」一起打出来；两边对不上也能跑（例如 Apple 芯片上装了 x64 的 node，走 Rosetta），
+只是建议换成对应的原生版本，更省电也更快。
+
+只想临时用一下，也可以手动启动：
+
+```text
+node helper/dstu-helper.mjs
+```
 
 余额来源按顺序尝试：
 
@@ -126,7 +165,7 @@ node helper\dstu-helper.mjs
 | 2 | `DEEPSEEK_API_KEY` | 环境变量里的 Key |
 | 3 | Codex 配置的 `env_key` | `config.toml` 里 `env_key` 指到的环境变量 |
 | 4 | `~/.codex/auth.json` | Codex 自己保存的 Key |
-| 5 | 本机加密保存的 Key | 在面板里填一次 Key，由助手用 DPAPI 加密存到本机 |
+| 5 | 本机加密保存的 Key | Windows：面板里填一次，助手用 DPAPI 加密存到本机；macOS：存进登录钥匙串；Linux 用前四条来源 |
 
 助手只在 Codex 运行时才工作，Codex 退出它就停；不装它，面板的用量与费用统计、以及手动记录的余额都不受影响。
 
@@ -136,7 +175,10 @@ node helper\dstu-helper.mjs
 powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
 ```
 
-然后重启 Codex。如果装过本机助手，再删掉 `%LOCALAPPDATA%\Codex++\deepseek-balance.key` 即可。
+然后重启 Codex。如果装过本机助手，用它自己的卸载命令还原（Windows `… -Uninstall`、
+macOS / Linux `bash install-helper.sh -Uninstall`）；存过的 Key 按需自行删除：
+Windows 是 `%LOCALAPPDATA%\Codex++\deepseek-balance.key`，macOS 在登录钥匙串里
+（`security delete-generic-password -a codexpp -s deepseek-balance`）。
 
 ## 隐私说明
 
@@ -144,7 +186,7 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
 - 面板默认不保存 API Key：填进「API Key」框的 Key 只留在页面内存里，关掉 Codex 就没了；只有你主动勾上「把 Key 记在本机」才会写进 Codex 本机存储。Key 不写日志、不随脚本上传；
 - 不读取、不保存聊天正文、提示词或完整响应；
 - 只记录模型名、token 数量、费用、时间等统计字段，保存在 Codex 本机本地存储里；
-- 可选的本机助手才会联网（DeepSeek 余额接口，或你自己配置的代理地址），它只把余额数字交给面板；Key 用 Windows DPAPI 按当前用户加密保存，从不写进日志；
+- 可选的本机助手才会联网（DeepSeek 余额接口，或你自己配置的代理地址），它只把余额数字交给面板；Key 在 Windows 上用 DPAPI、macOS 上用登录钥匙串按当前用户加密保存，Linux 上没有本机加密保存、改用环境变量或 `~/.codex/auth.json`，从不写进日志；
 - 代码中不包含任何机器 IP、用户名、服务器地址或密钥。
 
 ## 费率说明

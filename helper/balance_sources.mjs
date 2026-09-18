@@ -28,8 +28,64 @@ export const KEY_SOURCES = ['env', 'auth', 'store'];
 const DEFAULT_DIRECT_URL = 'https://api.deepseek.com/user/balance';
 const DEFAULT_REQUEST_TIMEOUT_MS = 8000;
 const POWERSHELL_TIMEOUT_MS = 20000;
+const KEYCHAIN_SERVICE = 'deepseek-balance';
+const KEYCHAIN_ACCOUNT = 'codexpp';
+
+function isWindows() {
+  return process.platform === 'win32';
+}
+
+function isMac() {
+  return process.platform === 'darwin';
+}
+
+/*
+ * macOS 上用登录钥匙串存 Key（跟 Windows 的 DPAPI 对位），加一次以后助手就
+ * 能自己读到；Key 不落在普通文件里，也不会出现在进程列表里。
+ */
+function readKeychainKey() {
+  try {
+    const output = execFileSync(
+      'security',
+      [
+        'find-generic-password',
+        '-a',
+        KEYCHAIN_ACCOUNT,
+        '-s',
+        KEYCHAIN_SERVICE,
+        '-w',
+      ],
+      { encoding: 'utf8', timeout: POWERSHELL_TIMEOUT_MS }
+    );
+    return usableKey(output);
+  } catch (_) {
+    return '';
+  }
+}
+
+function keychainPresent() {
+  try {
+    execFileSync(
+      'security',
+      ['find-generic-password', '-a', KEYCHAIN_ACCOUNT, '-s', KEYCHAIN_SERVICE],
+      { stdio: 'ignore', timeout: POWERSHELL_TIMEOUT_MS }
+    );
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
 export function defaultStorePath() {
+  if (isMac()) {
+    return path.join(
+      os.homedir(),
+      'Library',
+      'Application Support',
+      'Codex++',
+      'deepseek-balance.key'
+    );
+  }
   const base =
     process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
   return path.join(base, 'Codex++', 'deepseek-balance.key');
@@ -194,6 +250,7 @@ export function readAuthKey(options = {}) {
 }
 
 export function readStoredKey(options = {}) {
+  if (isMac()) return readKeychainKey();
   const storePath = options.storePath || defaultStorePath();
   if (!fs.existsSync(storePath)) return '';
   const script = options.keyScript || defaultKeyScript();
@@ -229,6 +286,20 @@ export function readStoredKey(options = {}) {
 export function saveStoredKey(key, options = {}) {
   const value = usableKey(key);
   if (!value) return { ok: false, error: 'Key 看起来不完整' };
+  if (isMac()) {
+    return {
+      ok: false,
+      error:
+        'macOS 上不在本机落盘保存 Key：用环境变量 DEEPSEEK_API_KEY、config.toml 的 env_key，或让助手读 ~/.codex/auth.json；也可以自己执行 security add-generic-password -a codexpp -s deepseek-balance -w 存进钥匙串',
+    };
+  }
+  if (!isWindows()) {
+    return {
+      ok: false,
+      error:
+        '这台系统没有本机加密保存：用环境变量 DEEPSEEK_API_KEY、config.toml 的 env_key，或让助手读 ~/.codex/auth.json',
+    };
+  }
   const storePath = options.storePath || defaultStorePath();
   const script = options.keyScript || defaultKeyScript();
   try {
@@ -258,6 +329,27 @@ export function saveStoredKey(key, options = {}) {
 }
 
 export function clearStoredKey(options = {}) {
+  if (isMac()) {
+    try {
+      execFileSync(
+        'security',
+        [
+          'delete-generic-password',
+          '-a',
+          KEYCHAIN_ACCOUNT,
+          '-s',
+          KEYCHAIN_SERVICE,
+        ],
+        { stdio: 'ignore', timeout: POWERSHELL_TIMEOUT_MS }
+      );
+      return { ok: true };
+    } catch (_) {
+      return { ok: false, error: '删除钥匙串里的 Key 失败（可能本来就没存过）' };
+    }
+  }
+  if (!isWindows()) {
+    return { ok: false, error: '这台系统没有本机加密保存的 Key 可删' };
+  }
   const storePath = options.storePath || defaultStorePath();
   const script = options.keyScript || defaultKeyScript();
   try {
@@ -286,6 +378,7 @@ export function clearStoredKey(options = {}) {
 }
 
 export function storedKeyPresent(options = {}) {
+  if (isMac()) return keychainPresent();
   return fs.existsSync(options.storePath || defaultStorePath());
 }
 

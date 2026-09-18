@@ -45,11 +45,19 @@ const directBalanceUrl =
 const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 const keyStorePath =
   process.env.DSTU_KEY_STORE ||
-  path.join(
-    process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'),
-    'Codex++',
-    'deepseek-balance.key'
-  );
+  (process.platform === 'darwin'
+    ? path.join(
+        os.homedir(),
+        'Library',
+        'Application Support',
+        'Codex++',
+        'deepseek-balance.key'
+      )
+    : path.join(
+        process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'),
+        'Codex++',
+        'deepseek-balance.key'
+      ));
 const balanceIntervalMs =
   Number(process.env.DSTU_BALANCE_INTERVAL_MS || 5 * 60 * 1000);
 const pollMs = Number(process.env.DSTU_POLL_MS || 15000);

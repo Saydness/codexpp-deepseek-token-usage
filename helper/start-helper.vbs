@@ -77,13 +77,34 @@ Function ResolveNode()
             Exit Function
         End If
     End If
+    ' PATH may not carry node when this runs from the Startup folder (nvm-windows,
+    ' Volta, Scoop, fnm, manual installs). Try the usual homes; all of them are
+    ' plain file paths, so x64 and ARM64 Windows work the same way.
+    Dim homes, i, candidate
+    homes = Array( _
+        "%ProgramFiles%\nodejs\node.exe", _
+        "%ProgramFiles(x86)%\nodejs\node.exe", _
+        "%LOCALAPPDATA%\Programs\nodejs\node.exe", _
+        "%APPDATA%\nvm\node.exe", _
+        "%LOCALAPPDATA%\Volta\bin\node.exe", _
+        "%LOCALAPPDATA%\fnm_multishells\node.exe", _
+        "%USERPROFILE%\scoop\shims\node.exe", _
+        "%ProgramData%\chocolatey\bin\node.exe", _
+        "C:\nodejs\node.exe")
+    For i = 0 To UBound(homes)
+        candidate = sh.ExpandEnvironmentStrings(homes(i))
+        If fso.FileExists(candidate) Then
+            ResolveNode = candidate
+            Exit Function
+        End If
+    Next
     ResolveNode = "node.exe"
 End Function
 
 Function IsCodexRunning()
     Dim procs, p
     IsCodexRunning = False
-    Set procs = wmi.ExecQuery("SELECT Name FROM Win32_Process WHERE Name='ChatGPT.exe' OR Name='codex.exe'")
+    Set procs = wmi.ExecQuery("SELECT Name FROM Win32_Process WHERE Name='ChatGPT.exe' OR Name='codex.exe' OR Name='codex-plus-plus.exe' OR Name='CodexPlusPlus.exe'")
     For Each p In procs
         IsCodexRunning = True
         Exit Function
