@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.19.5
+// @version      1.19.6
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-const VERSION = "1.19.5";
+const VERSION = "1.19.6";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -43,8 +43,8 @@ const VERSION = "1.19.5";
   /*
    * Codex++ 的网络桥目前只放行 POST，而 DeepSeek 余额接口只认 GET，面板直连
    * 这条路暂时查不通，所以在 UI 上先撤掉（实现代码全部保留）。等 Codex++ 放开
-   * GET（或出现 POST 版余额接口），把下面这一行改回 true，自动查询、Key 设置区
-   * 和状态提示会一起恢复，其它地方都不用动。
+   * GET（或出现 POST 版余额接口），把下面这一行改回 true，面板直连查询与状态提示
+   * 会一起恢复，其它地方都不用动（面板上没有 Key 输入区，直连只认 Codex 配置里的 Key）。
    */
   const BRIDGE_BALANCE_QUERY_ENABLED = false;
   const BALANCE_QUERY_MIN_GAP_MS = 30 * 1000;
@@ -751,11 +751,6 @@ const VERSION = "1.19.5";
     return { key: "", label: "", source: "" };
   }
 
-  function balanceKeyText() {
-    const info = balanceKeyInfo();
-    if (!info.key) return "未填 Key";
-    return `${info.label} · ${maskKeyTail(info.key)}`;
-  }
 
   function balanceBridgeReady() {
     return typeof window[BALANCE_BRIDGE_FN] === "function";
@@ -866,7 +861,7 @@ const VERSION = "1.19.5";
   function balanceQueryFailureText(result) {
     if (result?.fatal && result.message) return result.message;
     if (result?.bridgeBlocksGet) {
-      return "面板直连查不了：当前 Codex++ 的网络桥只允许 POST，余额接口只认 GET（先手动记录一次，或等 Codex++ 开放 GET 后自动生效）";
+      return "面板直连查不了：当前 Codex++ 的网络桥只允许 POST，余额接口只认 GET（装本机助手可以自动更新，或等 Codex++ 开放 GET 后自动生效）";
     }
     const reasons = Array.isArray(result?.reasons) ? result.reasons : [];
     if (!reasons.length) return "余额查询失败";
@@ -906,16 +901,16 @@ const VERSION = "1.19.5";
     if (!info.key) {
       state.settings.balanceQueryOk = null;
       state.settings.balanceQueryNote =
-        "还没有 Key：填一次就能自动更新，也可以直接用下面的手动记录";
+        "面板直连要 Key：装本机助手后由它自动更新余额";
       if (!silent) {
-        setBalanceStatus("先填一次 API Key，或者手动记录当前余额", "warn");
+        setBalanceStatus("面板直连要 Key；装本机助手可以让余额自动更新", "warn");
       }
       render();
       return null;
     }
     if (!balanceBridgeReady()) {
       state.settings.balanceQueryOk = false;
-      state.settings.balanceQueryNote = "当前 Codex++ 没开放网络桥，面板查不到余额（可先手动记录）";
+      state.settings.balanceQueryNote = "当前 Codex++ 没开放网络桥，面板查不到余额（装本机助手可以自动更新）";
       if (!silent) setBalanceStatus(state.settings.balanceQueryNote, "warn");
       render();
       return null;
@@ -1487,23 +1482,23 @@ const VERSION = "1.19.5";
       if (balanceHelperAlive()) {
         return "余额由本机助手自动更新 · 点「刷新余额」立刻补一次";
       }
-      return "自动更新要装一次本机助手：点「一键安装」；也可以先用「记录余额」手填";
+      return "自动更新要装一次本机助手：点「一键安装」，余额就会自动更新";
     }
     if (!balanceKeyInfo().key) {
-      return "填一次 API Key 就能自动更新；也可以直接手动记录";
+      return "面板直连要 Key（读 Codex 配置里那把）；装本机助手可以让余额自动更新";
     }
     return "已就绪，点「刷新余额」立刻查询";
   }
 
   /*
    * 面板自己连不了网，「刷新余额」就请本机助手去查：它在本机用 GET，读得到。
-   * 没检测到助手就直接说去装：点「一键安装」，不想装还能用「记录余额」手填。
+   * 没检测到助手就直接说去装：面板没有手填渠道，余额只由助手提供。
    */
   function requestHelperBalanceRefresh({ silent = false } = {}) {
     if (!balanceHelperAlive()) {
       if (!silent) {
         setBalanceStatus(
-          "本机助手没在跑：点「一键安装」装上它，余额就会自动更新；也可以先用「记录余额」手填",
+          "本机助手没在跑：点「一键安装」装上它，余额就会自动更新",
           "warn"
         );
       }
@@ -1538,7 +1533,7 @@ const VERSION = "1.19.5";
       return true;
     }
     if (!silent) {
-      setBalanceStatus("先填一次 API Key；也可以直接用「记录余额」手动填", "warn");
+      setBalanceStatus("面板直连要 Key；装本机助手可以让余额自动更新", "warn");
     }
     render();
     return false;
@@ -2188,15 +2183,13 @@ const VERSION = "1.19.5";
             <div class="dsu-balance-main">
               <span>当前余额</span>
               <strong data-field="balanceNow">—</strong>
-              <small data-field="balanceNowHint">尚未记录</small>
+              <small data-field="balanceNowHint">等助手回填</small>
             </div>
             <div><span>今日消耗</span><strong data-field="balanceToday">—</strong><small data-field="balanceTodayHint"></small></div>
             <div><span>昨日消耗</span><strong data-field="balanceYesterday">—</strong><small data-field="balanceYesterdayHint"></small></div>
             <div><span>本月消耗</span><strong data-field="balanceMonth">—</strong><small data-field="balanceMonthHint"></small></div>
           </div>
           <div class="dsu-balance-actions">
-            <input data-field="balanceInput" type="number" step="0.01" min="0" placeholder="手动填入当前余额">
-            <button type="button" class="dsu-text-button" data-action="balance-save">记录余额</button>
             <!--
               这颗按钮在「桥能直连」或「本机助手在跑」时才有意义，两种情况都由 render
               按行内样式决定显隐；不要再挂 data-bridge-only——那条规则带 !important，
@@ -2210,38 +2203,13 @@ const VERSION = "1.19.5";
               <strong data-field="balanceSyncHint">检测中…</strong>
             </p>
             <section class="dsu-balance-group">
-              <h4 class="dsu-balance-group-title">Key 设置</h4>
-              <div class="dsu-balance-fields">
-                <label class="dsu-field">
-                  <span>取 Key 的方式</span>
-                  <select data-field="balanceKeyMode">
-                    <option value="auto">自动读 Codex 配置里的 Key</option>
-                    <option value="manual">只用我下面填的 Key</option>
-                  </select>
-                </label>
-                <label class="dsu-field">
-                  <span>API Key</span>
-                  <input data-field="balanceKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...（填一次即可）">
-                </label>
-              </div>
-              <div class="dsu-balance-key-actions">
-                <button type="button" class="dsu-text-button" data-action="balance-key-save">用这个 Key</button>
-                <button type="button" class="dsu-text-button" data-action="balance-key-config">读取 Codex 配置</button>
-                <button type="button" class="dsu-text-button" data-action="balance-key-clear">清除 Key</button>
-              </div>
-              <p class="dsu-balance-note" data-field="balanceKeyState">当前 Key：未填</p>
-            </section>
-            <section class="dsu-balance-group">
               <h4 class="dsu-balance-group-title">选项</h4>
               <div class="dsu-balance-options">
-                <label class="dsu-balance-switch">
-                  <input type="checkbox" data-field="balanceKeyRemember"> 把 Key 记在本机（重开 Codex 不用再填）
-                </label>
                 <label class="dsu-balance-switch">
                   <input type="checkbox" data-field="balanceEnabled"> 启用余额统计
                 </label>
               </div>
-              <p class="dsu-balance-note">Key 只用来查 DeepSeek 余额，脚本本体不含任何 Key，也<strong>不会进统计、不会随脚本上传</strong>；不勾「记在本机」就只保留在本次运行的页面内存里。装了本机助手的机器通常不用填：助手会直接用 Codex 配置里的那把 Key。</p>
+              <p class="dsu-balance-note">余额由本机助手在本机读取，<strong>面板不保存任何 Key</strong>：助手自己从 Codex 的配置里找（环境变量 <code>DEEPSEEK_API_KEY</code>、<code>config.toml</code> 的 <code>env_key</code>、<code>~/.codex/auth.json</code>）。Key 不进统计、不写日志、不随脚本上传。</p>
             </section>
             <section class="dsu-balance-group">
               <h4 class="dsu-balance-group-title">本机助手（可选）</h4>
@@ -2263,11 +2231,11 @@ const VERSION = "1.19.5";
                   </select>
                 </label>
               </div>
-              <p class="dsu-balance-note">装了助手才会自动更新余额（不用自己填 Key：助手会直接用 Codex 里已有的那把）：Codex 运行时每 5 分钟读一次、点「刷新余额」立刻补一次，Codex 退出就停。点「一键安装」＝把安装请求写进 Codex 对话框并直接发送，由 Codex 在这台电脑上执行安装脚本（先检查依赖：Node.js 已经有就直接用、没有才替你装好；Windows 先试 winget、macOS 先试 Homebrew，都不用管理员权限）。Codex 停在别的页面或正忙时会退回复制命令，粘进 PowerShell / 终端回车，效果一样；命令按上面的系统选择给（现在按 <span data-field="helperPlatformLabel">Windows</span> 给）。Codex++ 现有的三种安装包（Windows x64、macOS Intel、macOS Apple 芯片）都走这一套命令，脚本自己按机器适配。</p>
+              <p class="dsu-balance-note">装了助手才会自动更新余额（它会用 Codex 里已有的那把 Key，不用你填）：Codex 运行时每 5 分钟读一次、点「刷新余额」立刻补一次，Codex 退出就停。点「一键安装」＝把安装请求写进 Codex 对话框并直接发送，由 Codex 在这台电脑上执行安装脚本（先检查依赖：Node.js 已经有就直接用、没有才替你装好；Windows 先试 winget、macOS 先试 Homebrew，都不用管理员权限）。Codex 停在别的页面或正忙时会退回复制命令，粘进 PowerShell / 终端回车，效果一样；命令按上面的系统选择给（现在按 <span data-field="helperPlatformLabel">Windows</span> 给）。Codex++ 现有的三种安装包（Windows x64、macOS Intel、macOS Apple 芯片）都走这一套命令，脚本自己按机器适配。</p>
             </section>
             <details class="dsu-balance-help">
               <summary>余额是怎么自动更新的？</summary>
-              <p class="dsu-balance-note">Codex 页面被安全策略挡住，自己连不了网，所以余额交给上面的「本机助手」去查：装一次之后，Codex 运行时每 5 分钟更新一次，点「刷新余额」立刻补一次。<strong>不用自己填 Key</strong>——助手会用 Codex 里已经有的那把 DeepSeek Key；只有 Codex 里也没存过时，才需要在上面填一次。</p>
+              <p class="dsu-balance-note">Codex 页面被安全策略挡住，自己连不了网，所以余额交给上面的「本机助手」去查：装一次之后，Codex 运行时每 5 分钟更新一次，点「刷新余额」立刻补一次。<strong>不用自己填 Key</strong>——助手会用 Codex 里已经有的那把 DeepSeek Key，面板上没有填 Key 的地方。</p>
             </details>
             <div class="dsu-balance-footer">
               <button type="button" class="dsu-text-button dsu-danger" data-action="balance-reset">清除余额记录</button>
@@ -2666,14 +2634,6 @@ const VERSION = "1.19.5";
         margin: 0; color: #64748b; font-size: 10px; font-weight: 600;
         letter-spacing: 0.08em;
       }
-      .dsu-balance-fields {
-        display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-        gap: 10px;
-      }
-      .dsu-balance-settings .dsu-field {
-        display: flex; flex-direction: column; align-items: stretch;
-        gap: 5px; color: #64748b; font-size: 11px;
-      }
       .dsu-balance-settings input[type="text"],
       .dsu-balance-settings input[type="password"] {
         width: 100%; min-width: 0; background: #0f141c; color: #e2e8f0;
@@ -2882,12 +2842,8 @@ const VERSION = "1.19.5";
     else if (action === "close") closePanel();
     else if (action === "clear") clearRecords();
     else if (action === "balance-fetch") requestBalanceRefresh();
-    else if (action === "balance-save") saveBalanceFromInput();
     else if (action === "balance-settings") toggleBalanceSettings();
     else if (action === "balance-reset") resetBalances();
-    else if (action === "balance-key-save") saveBalanceKeyFromInput();
-    else if (action === "balance-key-clear") clearSavedBalanceKey();
-    else if (action === "balance-key-config") useCodexConfigKey();
     else if (action === "helper-install") copyHelperCommand("install");
     else if (action === "helper-uninstall") copyHelperCommand("uninstall");
     else if (action === "helper-run") runHelperFromPanel(false);
@@ -2908,39 +2864,12 @@ const VERSION = "1.19.5";
     const monthInput = panel.querySelector('[data-field="monthInput"]');
     const modelSelect = panel.querySelector('[data-field="modelSelect"]');
     const chart = panel.querySelector('[data-field="chart"]');
-    const balanceInput = panel.querySelector('[data-field="balanceInput"]');
-    if (balanceInput) {
-      balanceInput.onkeydown = (event) => {
-        if (event.key !== "Enter") return;
-        event.preventDefault();
-        saveBalanceFromInput();
-      };
-    }
-    const balanceKeyInput = panel.querySelector('[data-field="balanceKeyInput"]');
-    if (balanceKeyInput) {
-      balanceKeyInput.onkeydown = (event) => {
-        if (event.key !== "Enter") return;
-        event.preventDefault();
-        saveBalanceKeyFromInput();
-      };
-    }
-    const balanceKeyMode = panel.querySelector('[data-field="balanceKeyMode"]');
-    if (balanceKeyMode) {
-      balanceKeyMode.onchange = () => setBalanceKeyMode(balanceKeyMode.value);
-    }
     const helperPlatformPickBox = panel.querySelector(
       '[data-field="helperPlatformPick"]'
     );
     if (helperPlatformPickBox) {
       helperPlatformPickBox.onchange = () =>
         setHelperPlatformPick(helperPlatformPickBox.value);
-    }
-    const balanceKeyRemember = panel.querySelector(
-      '[data-field="balanceKeyRemember"]'
-    );
-    if (balanceKeyRemember) {
-      balanceKeyRemember.onchange = () =>
-        setBalanceKeyRemember(balanceKeyRemember.checked);
     }
     const balanceEnabledBox = panel.querySelector('[data-field="balanceEnabled"]');
     if (balanceEnabledBox) {
@@ -3023,17 +2952,10 @@ const VERSION = "1.19.5";
       modelRows: panel.querySelector('[data-field="modelRows"]'),
       recentRows: panel.querySelector('[data-field="recentRows"]'),
       balanceRows: panel.querySelector('[data-field="balanceRows"]'),
-      balanceInput: panel.querySelector('[data-field="balanceInput"]'),
       balanceSettings: panel.querySelector('[data-field="balanceSettings"]'),
       balanceSyncHint: panel.querySelector('[data-field="balanceSyncHint"]'),
       balanceCard: panel.querySelector(".dsu-balance-card"),
       balanceEnabledBox: panel.querySelector('[data-field="balanceEnabled"]'),
-      balanceKeyInput: panel.querySelector('[data-field="balanceKeyInput"]'),
-      balanceKeyMode: panel.querySelector('[data-field="balanceKeyMode"]'),
-      balanceKeyRemember: panel.querySelector(
-        '[data-field="balanceKeyRemember"]'
-      ),
-      balanceKeyState: panel.querySelector('[data-field="balanceKeyState"]'),
       balanceHelperState: panel.querySelector(
         '[data-field="balanceHelperState"]'
       ),
@@ -3598,22 +3520,6 @@ const VERSION = "1.19.5";
     render({ animate: true });
   }
 
-  function saveBalanceFromInput() {
-    const input = state.ui?.panel?.querySelector('[data-field="balanceInput"]');
-    const raw = String(input?.value ?? "").trim();
-    const value = Number(raw);
-    /* 空输入会被 Number() 变成 0，那会把当天消耗算成充值，必须挡住。 */
-    if (!input || !raw || !Number.isFinite(value) || value <= 0) {
-      setBalanceStatus("请输入大于 0 的余额金额", "warn");
-      input?.focus();
-      return;
-    }
-    const currency = state.settings.balanceCurrency || "CNY";
-    recordBalance(value, { source: "manual", currency });
-    input.value = "";
-    setBalanceStatus(`已记录 ${formatBalance(value, currency)}`, "ok");
-  }
-
   function toggleBalanceSettings() {
     state.settings.balanceSettingsOpen = !state.settings.balanceSettingsOpen;
     scheduleSave();
@@ -3656,15 +3562,6 @@ const VERSION = "1.19.5";
     return true;
   }
 
-  function saveBalanceKeyFromInput() {
-    const input = state.ui?.panel?.querySelector('[data-field="balanceKeyInput"]');
-    const value = String(input?.value ?? "").trim();
-    if (!rememberBalanceKey(value)) {
-      input?.focus();
-      return;
-    }
-    if (input) input.value = "";
-  }
 
   function clearSavedBalanceKey() {
     panelBalanceKey = "";
@@ -3680,7 +3577,7 @@ const VERSION = "1.19.5";
     state.settings.balanceQueryNote = "";
     scheduleSave();
     render();
-    setBalanceStatus("Key 已清除（手动记录的余额不受影响）", "ok");
+    setBalanceStatus("Key 已清除（已有的余额记录不受影响）", "ok");
   }
 
   function setBalanceKeyMode(value) {
@@ -4081,29 +3978,6 @@ const VERSION = "1.19.5";
       }
       if (state.ui.balanceSettings) {
         state.ui.balanceSettings.hidden = !state.settings.balanceSettingsOpen;
-      }
-      if (state.ui.balanceKeyMode) {
-        state.ui.balanceKeyMode.value =
-          state.settings.balanceKeyMode === "manual" ? "manual" : "auto";
-      }
-      if (state.ui.balanceKeyRemember) {
-        state.ui.balanceKeyRemember.checked =
-          state.settings.balanceKeyRemember === true;
-      }
-      if (state.ui.balanceKeyState) {
-        const info = balanceKeyInfo();
-        const helperAlive = balanceHelperAlive();
-        let tail = balanceBridgeReady() ? "" : " · 网络桥不可用";
-        if (!BRIDGE_BALANCE_QUERY_ENABLED) {
-          tail = helperAlive
-            ? info.key
-              ? " · 余额交给本机助手自动更新"
-              : " · 不用填：本机助手会用 Codex 自己的 Key"
-            : " · 自动更新要装本机助手（点「一键安装」）";
-        }
-        state.ui.balanceKeyState.textContent = info.key
-          ? `当前 Key：${info.label} · ${maskKeyTail(info.key)}${tail}`
-          : `当前 Key：未填${tail}`;
       }
       if (state.ui.balanceEnabledBox) {
         state.ui.balanceEnabledBox.checked = balanceEnabled();

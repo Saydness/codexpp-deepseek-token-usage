@@ -86,7 +86,8 @@ node dstu-helper.mjs
 
 ## 余额来源
 
-按顺序尝试，先成功先用；面板「说明」里可以指定只用某一种。
+按顺序尝试，先成功先用。面板上没有 Key 输入框（1.19.6 起连「填 Key」控件都撤了），
+这一整套都在助手这边完成。
 
 | 顺序 | 来源 | 说明 |
 | --- | --- | --- |
@@ -94,7 +95,7 @@ node dstu-helper.mjs
 | 2 | 环境变量 | `DEEPSEEK_API_KEY` |
 | 3 | Codex 的 `env_key` | `config.toml` 里 `env_key` 指到的环境变量 |
 | 4 | `~/.codex/auth.json` | Codex 自己保存的 Key |
-| 5 | 本机加密保存的 Key | Windows：在面板里填一次，助手用 DPAPI 加密存到 `%LOCALAPPDATA%\Codex++\deepseek-balance.key`；macOS：存进登录钥匙串（`security add-generic-password -a codexpp -s deepseek-balance -w`，助手直接读得到） |
+| 5 | 本机加密保存的 Key | Windows：用 `set_balance_key.ps1` 存一次，助手用 DPAPI 加密存到 `%LOCALAPPDATA%\Codex++\deepseek-balance.key`；macOS：存进登录钥匙串（`security add-generic-password -a codexpp -s deepseek-balance -w`，助手直接读得到） |
 
 ## 环境变量
 
