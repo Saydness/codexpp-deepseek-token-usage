@@ -55,8 +55,9 @@ Windows : powershell -NoProfile -ExecutionPolicy Bypass -File .\install-helper.p
 macOS   : bash install-helper.sh
 ```
 
-也可以不下载仓库，直接在面板里点「复制一键安装命令」，把它粘到系统终端回车，剩下全自动
-（缺 Node.js 时脚本自己补，见上一节）：
+也可以不下载仓库，直接在面板里点「一键安装（交给 Codex）」——面板会把安装请求写进 Codex
+对话框并直接发送，由 Codex 在本机执行，剩下全自动（缺 Node.js 时脚本自己补，见上一节）。
+想自己动手就点「复制安装命令」，粘到系统终端回车，效果一样：
 
 ```text
 Windows → PowerShell 窗口    （脚本在内存里直接跑，不落地文件）

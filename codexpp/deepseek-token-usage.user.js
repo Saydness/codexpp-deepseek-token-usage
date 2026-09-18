@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.19.3
+// @version      1.19.4
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-const VERSION = "1.19.3";
+const VERSION = "1.19.4";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -59,9 +59,11 @@ const VERSION = "1.19.3";
   const MAX_BALANCE_SNAPSHOTS = 5000;
   /*
    * 可选的本机助手：面板自己装不了本机程序（页面在沙箱里，宿主桥也没有执行、
-   * 写文件的口子），所以只把一条安装命令准备好，用户点一下复制、粘到终端回车。
-   * 命令按系统给：Windows 是 PowerShell，macOS 是 curl | bash。
-   * 安装脚本自己会先检查机器上有没有能用的 Node.js：有就直接用，没有才替用户装。
+   * 写文件的口子），但应用里的 Codex 能在这台电脑上跑命令：点「一键安装」时
+   * 把安装请求写进对话框、直接发送，由 Codex 执行安装脚本；找不到对话框
+   * （或 Codex 正忙）时才退回「复制命令」让用户自己粘。
+   * 命令按系统给：Windows 是 PowerShell，macOS 是 curl | bash。安装脚本自己会先
+   * 检查机器上有没有能用的 Node.js：有就直接用，没有才替用户装。
    */
   const HELPER_RAW_BASE =
     "https://raw.githubusercontent.com/Saydness/codexpp-deepseek-token-usage/main/helper";
@@ -1281,6 +1283,81 @@ const VERSION = "1.19.3";
     return helperShellCommand(" -s -- -Uninstall");
   }
 
+  /*
+   * 把安装 / 卸载请求交给应用里的 Codex 执行：写进它的输入框，能发就直接发。
+   * 返回值说明：sent 已发送；waiting 已写进输入框但发送键不可用（Codex 正忙，
+   * 这颗键会变成「停止」，绝不能点）；composer-occupied 输入框里有用户自己的
+   * 内容，不能覆盖；no-composer / insert-failed 退回复制命令。
+   */
+  function codexComposerInput() {
+    return document.querySelector("[data-codex-composer]");
+  }
+
+  function codexSendButton() {
+    const composer = codexComposerInput();
+    if (!composer) return null;
+    let node = composer;
+    /* 只在输入框所在的这块结构里找，绝不扫到整页去点别的按钮。 */
+    for (
+      let depth = 0;
+      depth < 8 && node && node !== document.body && node !== document.documentElement;
+      depth += 1, node = node.parentElement
+    ) {
+      if (!node.querySelectorAll) continue;
+      for (const button of node.querySelectorAll("button")) {
+        const label = String(button.getAttribute("aria-label") || "").trim();
+        /* 只认「发送」，codexHelperRequest 的注释里说明了为什么不能点别的键。 */
+        if (/^(发送|发送消息|提交|Send|Send message|Submit)$/i.test(label)) {
+          return button;
+        }
+      }
+    }
+    return null;
+  }
+
+  function codexHelperRequest(command, uninstall) {
+    const composer = codexComposerInput();
+    if (!composer) return "no-composer";
+    const existing = String(composer.textContent || "");
+    if (!existing.includes("DeepSeek 用量面板")) {
+      if (existing.trim()) return "composer-occupied";
+      const lines = uninstall
+        ? [
+            "【DeepSeek 用量面板】请在这台电脑上卸载 DeepSeek 余额小助手（面板其它功能不受影响）。",
+            "",
+            "直接执行下面这条命令即可，不需要管理员权限：",
+            command,
+            "",
+            "执行完说一声结果就行。",
+          ]
+        : [
+            "【DeepSeek 用量面板】请在这台电脑上装一下「本机助手」，它负责把 DeepSeek 账户余额推给用量面板。",
+            "",
+            "直接执行下面这条命令即可：脚本会先检查这台机器，Node.js 已经有就直接用、没有才自动补上，全程不需要管理员权限：",
+            command,
+            "",
+            "装好后面板上的助手状态会变成「运行中」，不用重启 Codex。",
+          ];
+      composer.focus();
+      const range = document.createRange();
+      range.selectNodeContents(composer);
+      range.collapse(false);
+      const selection = window.getSelection();
+      if (selection) {
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+      document.execCommand("insertText", false, lines.join("\n"));
+      if (!String(composer.textContent || "").includes("DeepSeek 用量面板")) {
+        return "insert-failed";
+      }
+    }
+    const send = codexSendButton();
+    if (!send) return "waiting";
+    send.click();
+    return "sent";
+  }
+
   function setHelperPlatformPick(value) {
     state.settings.helperPlatformPick =
       value === "win" || value === "mac" ? value : "auto";
@@ -1334,6 +1411,40 @@ const VERSION = "1.19.3";
       /* 落到下面的兜底 */
     }
     done(fallbackCopyText(command));
+  }
+
+  /*
+   * 面板上的「一键安装 / 卸载」：优先让 Codex 直接执行；它没在对话页（找不到
+   * 输入框）、正忙或输入框被占用时，退回复制命令，用户照样能一条命令装好。
+   */
+  function runHelperFromPanel(uninstall) {
+    const command = uninstall ? helperUninstallCommand() : helperInstallCommand();
+    const result = codexHelperRequest(command, uninstall);
+    if (result === "sent") {
+      setBalanceStatus(
+        uninstall
+          ? "已让 Codex 在这台电脑上卸载助手，进度看对话窗口"
+          : "已让 Codex 在这台电脑上安装助手（先检测依赖、缺了才补），装好后这里会显示「运行中」",
+        "ok"
+      );
+      return;
+    }
+    if (result === "waiting") {
+      setBalanceStatus(
+        "安装请求已经写进 Codex 输入框；它正忙，等忙完按回车发送即可",
+        "warn"
+      );
+      return;
+    }
+    if (result === "composer-occupied") {
+      setBalanceStatus(
+        "Codex 输入框里已经有内容，没有动它：可以点「复制安装命令」自己粘一次",
+        "warn"
+      );
+      return;
+    }
+    /* 找不到输入框或写入失败：退回复制，不让用户空手而归。 */
+    copyHelperCommand(uninstall ? "uninstall" : "install");
   }
 
   function formatAgo(milliseconds) {
@@ -2134,7 +2245,9 @@ const VERSION = "1.19.3";
                 <strong data-field="balanceHelperState">检测中…</strong>
               </p>
               <div class="dsu-balance-key-actions">
-                <button type="button" class="dsu-text-button" data-action="helper-install">复制一键安装命令</button>
+                <button type="button" class="dsu-text-button" data-action="helper-run">一键安装（交给 Codex）</button>
+                <button type="button" class="dsu-text-button" data-action="helper-install">复制安装命令</button>
+                <button type="button" class="dsu-text-button" data-action="helper-uninstall-run">让 Codex 卸载</button>
                 <button type="button" class="dsu-text-button" data-action="helper-uninstall">复制卸载命令</button>
                 <label class="dsu-inline-pick">
                   <span>命令给哪个系统</span>
@@ -2145,7 +2258,7 @@ const VERSION = "1.19.3";
                   </select>
                 </label>
               </div>
-              <p class="dsu-balance-note">装了助手才会自动更新余额：Codex 运行时每 5 分钟读一次、点「刷新余额」立刻补一次，Codex 退出就停。点上面的按钮会复制一条命令（现在按 <span data-field="helperPlatformLabel">Windows</span> 给）；Windows 粘进 PowerShell，macOS 粘进「终端」，回车之后全自动：脚本先检查这台机器，Node.js 已经有就直接用，没有才替你装好（Windows 先试 winget、不成改用便携版，macOS 先试 Homebrew、不成改用官方安装包），不用管理员权限，也不用提前准备什么。Codex++ 现有的三种安装包（Windows x64、macOS Intel、macOS Apple 芯片）都走这一套命令，脚本自己按机器适配。</p>
+              <p class="dsu-balance-note">装了助手才会自动更新余额：Codex 运行时每 5 分钟读一次、点「刷新余额」立刻补一次，Codex 退出就停。点「一键安装」＝把安装请求写进 Codex 对话框并直接发送，由 Codex 在这台电脑上执行安装脚本（先检查依赖：Node.js 已经有就直接用、没有才替你装好；Windows 先试 winget、macOS 先试 Homebrew，都不用管理员权限）。Codex 停在别的页面或正忙时会退回复制命令，粘进 PowerShell / 终端回车，效果一样；命令按上面的系统选择给（现在按 <span data-field="helperPlatformLabel">Windows</span> 给）。Codex++ 现有的三种安装包（Windows x64、macOS Intel、macOS Apple 芯片）都走这一套命令，脚本自己按机器适配。</p>
             </section>
             <details class="dsu-balance-help">
               <summary>自动查询为什么先收起来了？</summary>
@@ -2772,6 +2885,8 @@ const VERSION = "1.19.3";
     else if (action === "balance-key-config") useCodexConfigKey();
     else if (action === "helper-install") copyHelperCommand("install");
     else if (action === "helper-uninstall") copyHelperCommand("uninstall");
+    else if (action === "helper-run") runHelperFromPanel(false);
+    else if (action === "helper-uninstall-run") runHelperFromPanel(true);
   }
 
   function bindPanelControls(panel) {

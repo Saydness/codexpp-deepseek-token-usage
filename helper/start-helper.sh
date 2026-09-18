@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DeepSeek 用量面板 · 本机助手看门狗（macOS / Linux）
+# DeepSeek 用量面板 · 本机助手看门狗（macOS）
 #
 # 助手只在 Codex 运行时才有意义：这个看门狗每 3 秒看一眼，Codex 在跑就确保
 # 助手在跑，Codex 退出就把助手停掉；它自己不打印任何东西，也不占资源。

@@ -64,7 +64,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 find_node() {
   if [ -n "${DSTU_NODE:-}" ] && [ -x "${DSTU_NODE}" ]; then printf '%s' "$DSTU_NODE"; return; fi
   # 先看 PATH，再按不同 CPU 架构的常见位置找：Apple 芯片的 Homebrew 在 /opt/homebrew，
-  # Intel 的 Homebrew 在 /usr/local，MacPorts 在 /opt/local，Linux 发行版多在 /usr/bin。
+  # Intel 的 Homebrew 在 /usr/local，MacPorts 在 /opt/local。
   for candidate in "$(command -v node 2>/dev/null || true)" \
     /opt/homebrew/bin/node /opt/homebrew/opt/node/bin/node \
     /usr/local/bin/node /usr/local/opt/node/bin/node \
@@ -252,7 +252,7 @@ show_status() {
     say "  Node.js  : $node（$(node_arch "$node")）"
   else
     say "  Node.js  : 没找到（助手要 Node.js 18+）"
-    say "             macOS 装法： brew install node ｜ 各家 Linux 用发行版仓库装 nodejs"
+    say "             macOS 装法： brew install node"
   fi
   if [ "$PLATFORM" = "mac" ] && have security; then
     if security find-generic-password -s deepseek-balance >/dev/null 2>&1; then
