@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.19.4
+// @version      1.19.5
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-const VERSION = "1.19.4";
+const VERSION = "1.19.5";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -1017,7 +1017,9 @@ const VERSION = "1.19.4";
       setBalanceStatus(
         BRIDGE_BALANCE_QUERY_ENABLED
           ? `已读到配置里的 Key（${maskKeyTail(key)}）`
-          : `已读到配置里的 Key（${maskKeyTail(key)}）· 有 Key，但自动查询暂缓：Codex++ 桥只放行 POST，余额接口只认 GET`,
+          : balanceHelperAlive()
+            ? `已读到配置里的 Key（${maskKeyTail(key)}）· 余额交给本机助手更新`
+            : `已读到配置里的 Key（${maskKeyTail(key)}）· 装上本机助手（点「一键安装」）就能自动更新`,
         "ok"
       );
     }
@@ -1480,9 +1482,12 @@ const VERSION = "1.19.4";
     ) {
       return note;
     }
-    /* 桥这条路先撤了：查不到时只说手动记录，不摆桥的错误、也不提助手。 */
+    /* 面板自己连不了网：自动更新的活交给本机助手，没装就直接引导去装。 */
     if (!BRIDGE_BALANCE_QUERY_ENABLED) {
-      return "自动查询暂缓：Codex++ 桥只放行 POST，余额接口只认 GET · 先用「记录余额」手填";
+      if (balanceHelperAlive()) {
+        return "余额由本机助手自动更新 · 点「刷新余额」立刻补一次";
+      }
+      return "自动更新要装一次本机助手：点「一键安装」；也可以先用「记录余额」手填";
     }
     if (!balanceKeyInfo().key) {
       return "填一次 API Key 就能自动更新；也可以直接手动记录";
@@ -1491,14 +1496,14 @@ const VERSION = "1.19.4";
   }
 
   /*
-   * 桥还查不了余额时，「刷新余额」只请本机助手去查：它用 GET，读得到。
-   * 没检测到助手就说清楚"现在只能手动记录"，不报网络桥的限制、也不提助手。
+   * 面板自己连不了网，「刷新余额」就请本机助手去查：它在本机用 GET，读得到。
+   * 没检测到助手就直接说去装：点「一键安装」，不想装还能用「记录余额」手填。
    */
   function requestHelperBalanceRefresh({ silent = false } = {}) {
     if (!balanceHelperAlive()) {
       if (!silent) {
         setBalanceStatus(
-          "自动查询暂缓：Codex++ 桥只放行 POST，余额接口只认 GET · 先用「记录余额」手填",
+          "本机助手没在跑：点「一键安装」装上它，余额就会自动更新；也可以先用「记录余额」手填",
           "warn"
         );
       }
@@ -2236,7 +2241,7 @@ const VERSION = "1.19.4";
                   <input type="checkbox" data-field="balanceEnabled"> 启用余额统计
                 </label>
               </div>
-              <p class="dsu-balance-note">Key 只用来查 DeepSeek 余额，脚本本体不含任何 Key，也<strong>不会进统计、不会随脚本上传</strong>；不勾「记在本机」就只保留在本次运行的页面内存里。</p>
+              <p class="dsu-balance-note">Key 只用来查 DeepSeek 余额，脚本本体不含任何 Key，也<strong>不会进统计、不会随脚本上传</strong>；不勾「记在本机」就只保留在本次运行的页面内存里。装了本机助手的机器通常不用填：助手会直接用 Codex 配置里的那把 Key。</p>
             </section>
             <section class="dsu-balance-group">
               <h4 class="dsu-balance-group-title">本机助手（可选）</h4>
@@ -2258,11 +2263,11 @@ const VERSION = "1.19.4";
                   </select>
                 </label>
               </div>
-              <p class="dsu-balance-note">装了助手才会自动更新余额：Codex 运行时每 5 分钟读一次、点「刷新余额」立刻补一次，Codex 退出就停。点「一键安装」＝把安装请求写进 Codex 对话框并直接发送，由 Codex 在这台电脑上执行安装脚本（先检查依赖：Node.js 已经有就直接用、没有才替你装好；Windows 先试 winget、macOS 先试 Homebrew，都不用管理员权限）。Codex 停在别的页面或正忙时会退回复制命令，粘进 PowerShell / 终端回车，效果一样；命令按上面的系统选择给（现在按 <span data-field="helperPlatformLabel">Windows</span> 给）。Codex++ 现有的三种安装包（Windows x64、macOS Intel、macOS Apple 芯片）都走这一套命令，脚本自己按机器适配。</p>
+              <p class="dsu-balance-note">装了助手才会自动更新余额（不用自己填 Key：助手会直接用 Codex 里已有的那把）：Codex 运行时每 5 分钟读一次、点「刷新余额」立刻补一次，Codex 退出就停。点「一键安装」＝把安装请求写进 Codex 对话框并直接发送，由 Codex 在这台电脑上执行安装脚本（先检查依赖：Node.js 已经有就直接用、没有才替你装好；Windows 先试 winget、macOS 先试 Homebrew，都不用管理员权限）。Codex 停在别的页面或正忙时会退回复制命令，粘进 PowerShell / 终端回车，效果一样；命令按上面的系统选择给（现在按 <span data-field="helperPlatformLabel">Windows</span> 给）。Codex++ 现有的三种安装包（Windows x64、macOS Intel、macOS Apple 芯片）都走这一套命令，脚本自己按机器适配。</p>
             </section>
             <details class="dsu-balance-help">
-              <summary>自动查询为什么先收起来了？</summary>
-              <p class="dsu-balance-note">Codex 页面被安全策略挡住，不能自己联网，只能借 Codex++ 的网络桥出去；这条桥目前只放行 POST，而 DeepSeek 的余额接口只认 GET，两边对不上，所以自动查询暂时不可用——实现代码保留着，等桥放开 GET 会自动回来。在那之前，用上面的「记录余额」填一次当前数值就能更新。</p>
+              <summary>余额是怎么自动更新的？</summary>
+              <p class="dsu-balance-note">Codex 页面被安全策略挡住，自己连不了网，所以余额交给上面的「本机助手」去查：装一次之后，Codex 运行时每 5 分钟更新一次，点「刷新余额」立刻补一次。<strong>不用自己填 Key</strong>——助手会用 Codex 里已经有的那把 DeepSeek Key；只有 Codex 里也没存过时，才需要在上面填一次。</p>
             </details>
             <div class="dsu-balance-footer">
               <button type="button" class="dsu-text-button dsu-danger" data-action="balance-reset">清除余额记录</button>
@@ -4087,13 +4092,18 @@ const VERSION = "1.19.4";
       }
       if (state.ui.balanceKeyState) {
         const info = balanceKeyInfo();
-        const bridge = balanceBridgeReady() ? "" : " · 网络桥不可用";
-        const pending = BRIDGE_BALANCE_QUERY_ENABLED
-          ? ""
-          : " · 自动查询暂缓（等 Codex++ 放开 GET）";
+        const helperAlive = balanceHelperAlive();
+        let tail = balanceBridgeReady() ? "" : " · 网络桥不可用";
+        if (!BRIDGE_BALANCE_QUERY_ENABLED) {
+          tail = helperAlive
+            ? info.key
+              ? " · 余额交给本机助手自动更新"
+              : " · 不用填：本机助手会用 Codex 自己的 Key"
+            : " · 自动更新要装本机助手（点「一键安装」）";
+        }
         state.ui.balanceKeyState.textContent = info.key
-          ? `当前 Key：${info.label} · ${maskKeyTail(info.key)}${bridge}${pending}`
-          : `当前 Key：未填${bridge}${pending}`;
+          ? `当前 Key：${info.label} · ${maskKeyTail(info.key)}${tail}`
+          : `当前 Key：未填${tail}`;
       }
       if (state.ui.balanceEnabledBox) {
         state.ui.balanceEnabledBox.checked = balanceEnabled();
