@@ -1,4 +1,4 @@
-<#
+﻿<#
  * DeepSeek balance key store.
  *
  * The key is encrypted with Windows DPAPI in the CurrentUser scope, so only

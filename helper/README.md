@@ -12,13 +12,14 @@ Codex 页面被安全策略禁止联网（CSP 加上跨域限制），面板自�
 - `balance_sources.mjs`：余额来源的解析与请求；
 - `set_balance_key.ps1`：Windows 上用 DPAPI（当前用户）保存 / 查看 / 清除 Key；
 - `install-helper.ps1` + `start-helper.vbs`：Windows 的一键安装脚本与看门狗（Codex 启动时拉起助手，退出就停）；
-- `install-helper.sh` + `start-helper.sh`：macOS / Linux 的一键安装脚本与看门狗；
+- `install-helper.sh` + `start-helper.sh`：macOS 的一键安装脚本与看门狗；
 - `安装本机助手.cmd` / `安装本机助手.command`：Windows / macOS 上直接双击安装（卸载同理）。
 
 ## 支持的机器
 
-不用挑对应的安装包：脚本只用系统自带的东西（sh / curl / pgrep、PowerShell / wscript），
-Node.js 装在哪由脚本自己找。面板里的「命令给哪个系统」默认自动识别，认错了可以手动换。
+Codex++ 目前只发布三种安装包：Windows x64、macOS x64（Intel）、macOS arm64（Apple 芯片），
+本助手把这三处都覆盖到；不用挑对应的安装包，脚本只用系统自带的东西（sh / curl / pgrep、
+PowerShell / wscript）。面板里的「命令给哪个系统」默认自动识别，认错了可以手动换。
 
 | 系统 | 架构 | 说明 |
 | --- | --- | --- |
@@ -26,13 +27,21 @@ Node.js 装在哪由脚本自己找。面板里的「命令给哪个系统」默
 | Windows | ARM64（骁龙本等） | Codex++ 本身是 x64 程序，走系统兼容层；助手是脚本 + Node，原生 ARM64 版 node 也照用 |
 | macOS | Apple 芯片（arm64） | Homebrew 的 `/opt/homebrew` 前缀也认；终端跑在 Rosetta 下同样能认出是 Apple 芯片 |
 | macOS | Intel（x86_64） | Homebrew 的 `/usr/local` 前缀、MacPorts 的 `/opt/local` 都认 |
-| Linux | x86_64 / ARM64 / armv7 | Ubuntu / Debian、Fedora、Arch 都行；自启动优先 systemd 用户服务，没有 systemd 就退回桌面自启动 |
-| WSL | x86_64 / ARM64 | 走 Linux 分支，装法一致 |
 
-node 的常见装法（PATH 之外的 nvm / fnm / volta / asdf / nodenv / Scoop / Chocolatey /
-nvm-windows 也都会去找）：Windows `winget install OpenJS.NodeJS.LTS` 或到 nodejs.org 下安装包
-（x64 与 ARM64 各有一版）；macOS `brew install node`；Linux 用发行版仓库
-（`sudo apt install nodejs npm` / `sudo dnf install nodejs` / `sudo pacman -S nodejs npm`）。
+## 依赖是先检测、后安装
+
+安装脚本不会闷头装东西，顺序是这样：
+
+1. 先找这台机器上已有的 Node.js（PATH、两套 Homebrew 前缀、MacPorts，以及 nvm / fnm /
+   volta / asdf / nodenv / Scoop / Chocolatey / nvm-windows，还有之前装过的便携版）；
+2. 找到且版本 ≥ 18：**直接使用，什么都不装**，脚本会打印用的是哪一个；
+3. 没找到，或者版本低于 18：才替用户补上——
+   - Windows：先试 `winget install OpenJS.NodeJS.LTS`（可能弹一次 UAC 授权），走不通就下载
+     官方便携包解压到 `%LOCALAPPDATA%\Codex++\node-runtime`（不需要管理员权限，也不动系统 PATH）；
+   - macOS：先试 `brew install node`，走不通就下载官方压缩包解压到
+     `~/Library/Application Support/Codex++/node-runtime`（同样不需要管理员权限）。
+
+用哪个 node 会记进安装目录的 `node-path.txt`，看门狗优先按它启动助手；装完无需重启电脑。
 
 `-Status` 会把「系统架构」和「node 架构」一起打出来。两边对不上也能跑
 （例如 Apple 芯片上装了 x64 的 node，走 Rosetta），只是建议换成对应的原生版本，更省电也更快。
@@ -42,29 +51,30 @@ nvm-windows 也都会去找）：Windows `winget install OpenJS.NodeJS.LTS` 或�
 需要 Node.js 18 以上。**一键安装**（推荐，装完不用再管）：
 
 ```text
-Windows   : powershell -NoProfile -ExecutionPolicy Bypass -File .\install-helper.ps1
-macOS/Linux: bash install-helper.sh
+Windows : powershell -NoProfile -ExecutionPolicy Bypass -File .\install-helper.ps1
+macOS   : bash install-helper.sh
 ```
 
-也可以不下载仓库，直接在面板里点「复制安装命令」，把它粘到系统终端回车：
+也可以不下载仓库，直接在面板里点「复制一键安装命令」，把它粘到系统终端回车，剩下全自动
+（缺 Node.js 时脚本自己补，见上一节）：
 
 ```text
-Windows    → PowerShell 窗口    （irm 下载 install-helper.ps1 后执行）
-macOS/Linux→ 终端               （curl -fsSL …/install-helper.sh | bash）
+Windows → PowerShell 窗口    （脚本在内存里直接跑，不落地文件）
+macOS   → 终端               （curl -fsSL …/install-helper.sh | bash）
 ```
 
-面板里那一行「命令给哪个系统」可以手动换（自动识别 / Windows / macOS / Linux），
+面板里那一行「命令给哪个系统」可以手动换（自动识别 / Windows / macOS），
 所以给另一台机器准备命令也不用改脚本。
 
 安装脚本做的事：把助手文件放进本机目录（Windows `%LOCALAPPDATA%\Codex++\dstu-helper`、
-macOS `~/Library/Application Support/Codex++/dstu-helper`、Linux `~/.local/share/codexpp/dstu-helper`），
-再登记一个开机自启（Windows 是「启动」文件夹里的快捷方式，macOS 是 LaunchAgent，Linux 优先 systemd 用户服务），
+macOS `~/Library/Application Support/Codex++/dstu-helper`），
+再登记一个开机自启（Windows 是「启动」文件夹里的快捷方式，macOS 是 LaunchAgent），
 最后把看门狗拉起来。看门狗每 3 秒看一眼：Codex 在跑就确保助手在跑，Codex 不在就把助手停掉，
 所以退出 Codex 后不会留下常驻进程。卸载：
 
 ```text
-Windows   : powershell -NoProfile -ExecutionPolicy Bypass -File .\install-helper.ps1 -Uninstall
-macOS/Linux: bash install-helper.sh -Uninstall
+Windows : powershell -NoProfile -ExecutionPolicy Bypass -File .\install-helper.ps1 -Uninstall
+macOS   : bash install-helper.sh -Uninstall
 ```
 
 手动跑（临时用一下）也可以：
@@ -83,7 +93,7 @@ node dstu-helper.mjs
 | 2 | 环境变量 | `DEEPSEEK_API_KEY` |
 | 3 | Codex 的 `env_key` | `config.toml` 里 `env_key` 指到的环境变量 |
 | 4 | `~/.codex/auth.json` | Codex 自己保存的 Key |
-| 5 | 本机加密保存的 Key | Windows：在面板里填一次，助手用 DPAPI 加密存到 `%LOCALAPPDATA%\Codex++\deepseek-balance.key`；macOS：存进登录钥匙串（`security add-generic-password -a codexpp -s deepseek-balance -w`，助手直接读得到）；Linux：没有本机加密保存，用前四条来源 |
+| 5 | 本机加密保存的 Key | Windows：在面板里填一次，助手用 DPAPI 加密存到 `%LOCALAPPDATA%\Codex++\deepseek-balance.key`；macOS：存进登录钥匙串（`security add-generic-password -a codexpp -s deepseek-balance -w`，助手直接读得到） |
 
 ## 环境变量
 

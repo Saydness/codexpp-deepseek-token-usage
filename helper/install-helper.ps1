@@ -1,4 +1,4 @@
-<#
+﻿<#
  * DeepSeek 用量面板 · 本机助手一键安装 / 卸载 / 查看状态
  *
  * 助手只负责把 DeepSeek 账户余额送进面板：Codex 在跑的时候每 5 分钟读一次，
@@ -19,9 +19,10 @@
  * 自启动：  「启动」文件夹中的「DeepSeek 用量助手.lnk」（指向 start-helper.vbs）
  * 不需要管理员权限；不写注册表、不建计划任务，卸载时把这两处一并清掉。
  *
- * 支持的机器：x64 与 ARM64 的 Windows 都一样能装——脚本只用系统自带的
- * PowerShell / wscript，node.exe 会去 PATH、Program Files、nvm-windows、
- * Volta、Scoop、Chocolatey 等常见位置找，不挑架构也不挑装法。
+ * 支持的机器：Codex++ 的 Windows x64 安装包（ARM64 机器上以兼容层跑的也是它）。
+ * 脚本只用系统自带的 PowerShell / wscript，node.exe 会去 PATH、Program Files、
+ * nvm-windows、Volta、Scoop、Chocolatey 等常见位置找：有现成的（18+）直接用，
+ * 没有才按机器架构替用户装一个，不挑装法、也不挑架构。
  #>
 [CmdletBinding()]
 param(
@@ -78,6 +79,8 @@ function Get-NodeExe {
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
     }
+    $portable = Get-PortableNodeExe
+    if ($portable) { return $portable }
     return ''
 }
 
@@ -89,6 +92,120 @@ function Get-ArchText {
     if ($isArm) { return ('Windows on ARM / ARM64（' + $bits + '，x64 程序走兼容层）') }
     if ($processArch) { return ('Windows ' + $processArch + '（' + $bits + '）') }
     return ('Windows（' + $bits + '）')
+}
+
+# winget / 便携包要按机器架构挑：ARM64 的机器上装 x64 版能跑（兼容层），但原生版更省电。
+function Get-MachineArch {
+    $arch = $env:PROCESSOR_ARCHITECTURE
+    if ($env:PROCESSOR_ARCHITEW6432) { $arch = $env:PROCESSOR_ARCHITEW6432 }
+    if ($arch -eq 'ARM64') { return 'arm64' }
+    return 'x64'
+}
+
+function Get-NodeMajor([string]$NodeExe) {
+    if (-not $NodeExe) { return 0 }
+    try {
+        $text = (@(& $NodeExe -p 'process.versions.node' 2>$null) | Select-Object -First 1)
+        $major = [int]([string]$text -split '\.')[0]
+        if ($major -gt 0) { return $major }
+    } catch { }
+    return 0
+}
+
+# 便携版 node：解压在本机目录里，不需要管理员权限，也不会动系统 PATH。
+function Get-PortableNodeExe {
+    $root = Join-Path $CodexPlusDir 'node-runtime'
+    if (-not (Test-Path -LiteralPath $root)) { return '' }
+    $candidate = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        ForEach-Object { Join-Path $_.FullName 'node.exe' } |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Select-Object -First 1
+    if (-not $candidate) { return '' }
+    return [string]$candidate
+}
+
+function Save-NodePath([string]$NodeExe) {
+    if (-not $NodeExe) { return }
+    try {
+        Set-Content -LiteralPath (Join-Path $InstallDir 'node-path.txt') -Value $NodeExe -Encoding ASCII
+    } catch { }
+}
+
+function Install-PortableNode {
+    $arch = Get-MachineArch
+    $version = 'v22.20.0'
+    try {
+        $index = (Invoke-WebRequest -Uri 'https://nodejs.org/dist/index.json' -UseBasicParsing -TimeoutSec 20).Content | ConvertFrom-Json
+        $lts = @($index | Where-Object { $_.lts }) | Select-Object -First 1
+        if ($lts -and $lts.version) { $version = [string]$lts.version }
+    } catch { }
+    $file = 'node-' + $version + '-win-' + $arch + '.zip'
+    $sources = @(
+        ('https://nodejs.org/dist/' + $version + '/' + $file),
+        ('https://npmmirror.com/mirrors/node/' + $version + '/' + $file)
+    )
+    $zip = Join-Path $env:TEMP $file
+    $downloaded = $false
+    foreach ($url in $sources) {
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        } catch { }
+        Write-Host ('  下载 ' + $url)
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 300
+            $downloaded = $true
+            break
+        } catch {
+            Write-Host ('  这条下不动（' + $_.Exception.Message + '），换下一条')
+        }
+    }
+    if (-not $downloaded) { return '' }
+    $root = Join-Path $CodexPlusDir 'node-runtime'
+    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    try {
+        Expand-Archive -LiteralPath $zip -DestinationPath $root -Force
+    } catch {
+        Write-Host ('  解压失败：' + $_.Exception.Message)
+        return ''
+    } finally {
+        try { Remove-Item -LiteralPath $zip -Force } catch { }
+    }
+    return (Get-PortableNodeExe)
+}
+
+<#
+ * 缺 Node.js 时自动补上：先试 winget（装成系统版，可能要过一次 UAC），
+ * 走不通就退回便携包（纯本机目录、不需要管理员、下载源带国内镜像）。
+#>
+function Ensure-NodeRuntime {
+    $existing = Get-NodeExe
+    if ($existing) {
+        $major = Get-NodeMajor $existing
+        if ($major -ge 18) {
+            Write-Host ('  检测到 Node.js：{0}（v{1}）——直接使用，不再安装' -f $existing, $major)
+            return $existing
+        }
+        Write-Host ('  检测到 Node.js：{0}，但版本低于 18，助手用不了，继续装新的' -f $existing) -ForegroundColor Yellow
+    } else {
+        Write-Host '  检测 Node.js：没装'
+    }
+    Write-Host '  助手需要 Node.js 18+，这里替你先装好（只装一次）。' -ForegroundColor Yellow
+    try {
+        $winget = (Get-Command winget -ErrorAction SilentlyContinue).Source
+        if ($winget) {
+            Write-Host '  用 winget 安装 Node.js LTS（可能会弹一次 UAC 授权窗口，点「是」即可）…'
+            & $winget install -e --id OpenJS.NodeJS.LTS --silent --accept-source-agreements --accept-package-agreements | Out-Null
+            $after = Get-NodeExe
+            if ($after -and (Get-NodeMajor $after) -ge 18) { return $after }
+        }
+    } catch {
+        Write-Host ('  winget 这条走不通（' + $_.Exception.Message + '）')
+    }
+    Write-Host '  改用便携版 Node.js（只装在本机目录，不需要管理员权限）…'
+    $portable = Install-PortableNode
+    if ($portable) { return $portable }
+    return ''
 }
 
 function Get-ProcessIdText($items) {
@@ -158,6 +275,10 @@ function Install-Helper {
         if (-not (Test-Path -LiteralPath $target)) { throw ('缺少文件：' + $name) }
     }
 
+    # 缺 Node.js 就在这里补上，用户只需要把这一个脚本跑起来。
+    $nodePath = Ensure-NodeRuntime
+    Save-NodePath $nodePath
+
     $shell = New-Object -ComObject WScript.Shell
     $link = $shell.CreateShortcut($StartupLink)
     $link.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
@@ -173,10 +294,13 @@ function Install-Helper {
         }
     }
 
-    if (-not (Get-NodeExe)) {
+    if (-not $nodePath) {
         Write-Host ''
-        Write-Host '提示：这台机器还没装 Node.js，助手暂时起不来；装好 Node.js 18+ 后不用重装，重启 Codex 即可。' -ForegroundColor Yellow
+        Write-Host '提示：Node.js 没装成功（网络不通或安装被取消），助手暂时起不来；' -ForegroundColor Yellow
+        Write-Host '     装上 Node.js 18+ 后不用重装本助手，重启 Codex 即可。' -ForegroundColor Yellow
         Write-Host '      winget install OpenJS.NodeJS.LTS   （没有 winget 就到 nodejs.org 下安装包）'
+    } else {
+        Write-Host ('  助手用的 Node.js：{0}' -f $nodePath)
     }
     Write-Host '已安装。' -ForegroundColor Green
     Write-Host '助手会跟着 Codex 自动启停，面板上会显示「运行中」。'

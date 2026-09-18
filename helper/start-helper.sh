@@ -21,6 +21,11 @@ LOG="${DSTU_LOG:-$DIR/helper.log}"
 
 find_node() {
   if [ -n "${DSTU_NODE:-}" ] && [ -x "${DSTU_NODE}" ]; then printf '%s' "$DSTU_NODE"; return; fi
+  # 安装脚本把选中的 node 记在 node-path.txt（可能是它自己装好的便携版）。
+  if [ -f "$DIR/node-path.txt" ]; then
+    saved="$(head -n 1 "$DIR/node-path.txt" 2>/dev/null || true)"
+    if [ -n "$saved" ] && [ -x "$saved" ]; then printf '%s' "$saved"; return; fi
+  fi
   # 不同 CPU 架构的常见位置都列上：Apple 芯片 Homebrew 在 /opt/homebrew，
   # Intel Homebrew 在 /usr/local，MacPorts 在 /opt/local，Linux 发行版多在 /usr/bin。
   for candidate in "$(command -v node 2>/dev/null || true)" \
@@ -34,7 +39,9 @@ find_node() {
     "$HOME"/.local/share/fnm/node-versions/*/installation/bin/node \
     "$HOME"/Library/Application\ Support/fnm/node-versions/*/installation/bin/node \
     "$HOME"/.volta/bin/node "$HOME"/.asdf/shims/node "$HOME"/.nodenv/shims/node \
-    "$HOME"/.local/bin/node; do
+    "$HOME"/.local/bin/node \
+    "$HOME"/Library/Application\ Support/Codex++/node-runtime/node-*/bin/node \
+    "${XDG_DATA_HOME:-$HOME/.local/share}"/codexpp/node-runtime/node-*/bin/node; do
     if [ -x "$candidate" ]; then printf '%s' "$candidate"; return; fi
   done
   printf '%s' ""

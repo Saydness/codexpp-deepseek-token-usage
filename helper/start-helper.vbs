@@ -60,6 +60,22 @@ Function ResolveNode()
         ResolveNode = override
         Exit Function
     End If
+    ' The installer writes the node it picked (often a portable copy it fetched
+    ' itself) into node-path.txt next to the helper; prefer that.
+    Dim savedPath, savedFile
+    savedFile = fso.BuildPath(fso.GetParentFolderName(WScript.ScriptFullName), "node-path.txt")
+    If fso.FileExists(savedFile) Then
+        On Error Resume Next
+        Dim stream
+        Set stream = fso.OpenTextFile(savedFile, 1)
+        savedPath = Trim(stream.ReadLine())
+        stream.Close
+        On Error GoTo 0
+        If Len(savedPath) > 0 And fso.FileExists(savedPath) Then
+            ResolveNode = savedPath
+            Exit Function
+        End If
+    End If
     output = ""
     On Error Resume Next
     Set shell = sh.Exec("%ComSpec% /c where node 2>nul")
