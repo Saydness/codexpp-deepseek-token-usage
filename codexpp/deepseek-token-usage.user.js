@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.19.6
+// @version      1.19.7
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-const VERSION = "1.19.6";
+const VERSION = "1.19.7";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -1518,7 +1518,7 @@ const VERSION = "1.19.6";
   function requestBalanceRefresh({ silent = false } = {}) {
     if (!balanceEnabled()) {
       if (!silent) {
-        setBalanceStatus("余额功能已关闭，可在「设置」里打开", "warn");
+        setBalanceStatus("余额功能已关闭，勾选卡片上的「启用」即可打开", "warn");
       }
       return false;
     }
@@ -2176,6 +2176,9 @@ const VERSION = "1.19.6";
         <div class="dsu-balance-card">
           <div class="dsu-card-title">
             <span>账户余额</span>
+            <label class="dsu-balance-enable">
+              <input type="checkbox" data-field="balanceEnabled"> 启用
+            </label>
             <span class="dsu-balance-status" data-field="balanceStatus"></span>
             <button type="button" class="dsu-text-button dsu-balance-toggle" data-action="balance-settings">设置</button>
           </div>
@@ -2203,15 +2206,6 @@ const VERSION = "1.19.6";
               <strong data-field="balanceSyncHint">检测中…</strong>
             </p>
             <section class="dsu-balance-group">
-              <h4 class="dsu-balance-group-title">选项</h4>
-              <div class="dsu-balance-options">
-                <label class="dsu-balance-switch">
-                  <input type="checkbox" data-field="balanceEnabled"> 启用余额统计
-                </label>
-              </div>
-              <p class="dsu-balance-note">余额由本机助手在本机读取，<strong>面板不保存任何 Key</strong>：助手自己从 Codex 的配置里找（环境变量 <code>DEEPSEEK_API_KEY</code>、<code>config.toml</code> 的 <code>env_key</code>、<code>~/.codex/auth.json</code>）。Key 不进统计、不写日志、不随脚本上传。</p>
-            </section>
-            <section class="dsu-balance-group">
               <h4 class="dsu-balance-group-title">本机助手（可选）</h4>
               <p class="dsu-balance-sync">
                 <span class="dsu-balance-sync-label">助手状态</span>
@@ -2231,11 +2225,11 @@ const VERSION = "1.19.6";
                   </select>
                 </label>
               </div>
-              <p class="dsu-balance-note">装了助手才会自动更新余额（它会用 Codex 里已有的那把 Key，不用你填）：Codex 运行时每 5 分钟读一次、点「刷新余额」立刻补一次，Codex 退出就停。点「一键安装」＝把安装请求写进 Codex 对话框并直接发送，由 Codex 在这台电脑上执行安装脚本（先检查依赖：Node.js 已经有就直接用、没有才替你装好；Windows 先试 winget、macOS 先试 Homebrew，都不用管理员权限）。Codex 停在别的页面或正忙时会退回复制命令，粘进 PowerShell / 终端回车，效果一样；命令按上面的系统选择给（现在按 <span data-field="helperPlatformLabel">Windows</span> 给）。Codex++ 现有的三种安装包（Windows x64、macOS Intel、macOS Apple 芯片）都走这一套命令，脚本自己按机器适配。</p>
+              <p class="dsu-balance-note">点「一键安装」＝让 Codex 在这台电脑上装好助手：缺 Node.js 会自动补，不需要管理员权限。命令按下面的系统选（现在按 <span data-field="helperPlatformLabel">Windows</span>）。Key 不用你管：助手会用 Codex 里已有的那把，面板不保存任何 Key。</p>
             </section>
             <details class="dsu-balance-help">
               <summary>余额是怎么自动更新的？</summary>
-              <p class="dsu-balance-note">Codex 页面被安全策略挡住，自己连不了网，所以余额交给上面的「本机助手」去查：装一次之后，Codex 运行时每 5 分钟更新一次，点「刷新余额」立刻补一次。<strong>不用自己填 Key</strong>——助手会用 Codex 里已经有的那把 DeepSeek Key，面板上没有填 Key 的地方。</p>
+              <p class="dsu-balance-note">Codex 页面自己连不了网，余额由「本机助手」在本机查：装一次之后每 5 分钟更新一次，点「刷新余额」立刻补一次。Key 由助手自己找（环境变量 / <code>config.toml</code> / <code>~/.codex/auth.json</code>），面板不接触 Key。</p>
             </details>
             <div class="dsu-balance-footer">
               <button type="button" class="dsu-text-button dsu-danger" data-action="balance-reset">清除余额记录</button>
@@ -2652,12 +2646,11 @@ const VERSION = "1.19.6";
       .dsu-balance-key-actions .dsu-inline-pick select {
         width: auto; padding: 4px 6px; font-size: 11px;
       }
-      .dsu-balance-options { display: flex; flex-wrap: wrap; gap: 8px 18px; }
-      .dsu-balance-settings .dsu-balance-switch {
-        display: flex; align-items: center; gap: 7px;
-        color: #94a3b8; font-size: 12px; cursor: pointer;
+      .dsu-balance-enable {
+        display: flex; align-items: center; gap: 5px;
+        color: #94a3b8; font-size: 11px; cursor: pointer;
       }
-      .dsu-balance-settings .dsu-balance-switch input { accent-color: #38bdf8; margin: 0; }
+      .dsu-balance-enable input { accent-color: #38bdf8; margin: 0; }
       .dsu-balance-help { border-top: 1px dashed #232c38; padding-top: 10px; }
       .dsu-balance-help summary { color: #64748b; font-size: 11px; cursor: pointer; }
       .dsu-balance-help summary:hover { color: #94a3b8; }
@@ -3926,7 +3919,7 @@ const VERSION = "1.19.6";
         latest
           ? `${formatDateTime(latest.t)} · ${balanceSourceLabel(latest.s)}`
           : !balanceEnabled()
-            ? "余额功能已关闭（点上方「设置」可打开）"
+            ? "余额功能已关闭（勾选上面的「启用」即可打开）"
             : balanceSyncText()
       );
       setText(
