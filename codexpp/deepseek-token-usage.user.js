@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.19.8
+// @version      1.19.9
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-const VERSION = "1.19.7";
+  const VERSION = "1.19.9";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -1111,52 +1111,121 @@ const VERSION = "1.19.7";
     return added;
   }
 
-  function dayDistance(from, to) {
-    const start = Date.parse(`${from}T00:00:00Z`);
-    const end = Date.parse(`${to}T00:00:00Z`);
-    if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
-    return Math.max(0, Math.round((end - start) / 86400000));
+  const DAY_MS = 86400000;
+  const DAY_SHIFT_MS = 8 * 60 * 60 * 1000;
+  /* 相邻两次快照隔得比这还久（助手/面板都没在跑），那一段只能算估算。 */
+  const BALANCE_GAP_MS = 3 * 60 * 60 * 1000;
+
+  function dayStartMs(timestamp) {
+    return (
+      Math.floor((Number(timestamp) + DAY_SHIFT_MS) / DAY_MS) * DAY_MS -
+      DAY_SHIFT_MS
+    );
+  }
+
+  /* 把 [from, to) 按自然日（+08:00）切开，跨零点的那一段按小时比例分给相邻两天。 */
+  function splitByDay(fromMs, toMs) {
+    const parts = [];
+    let cursor = Number(fromMs);
+    const end = Number(toMs);
+    let guard = 0;
+    while (cursor < end && guard < 400) {
+      const stop = Math.min(end, dayStartMs(cursor) + DAY_MS);
+      parts.push({
+        day: todayKey(cursor),
+        end: stop,
+        ms: stop - cursor,
+      });
+      cursor = stop;
+      guard += 1;
+    }
+    return parts;
   }
 
   /*
-   * 每天只保留首末两次快照：当日消耗 = 上一个有记录的收盘余额 - 当日收盘余额。
-   * 中间断档的日期会用 spanDays 标记，避免把跨多天的消耗当成单日消耗。
+   * 当日消耗怎么算：
+   * 1) 快照按时间排序，相邻两次之间的余额差（下降=消耗、上升=充值）按这段时间落在哪几天分摊，
+   *    跨零点的那一小段按小时比例分给相邻两天，不会整段算到第二天头上。
+   * 2) 每一笔只把属于这一天的部分记进这一天，所以别的时间段（比如面板没记录的那几个小时）
+   *    的消耗不会被挪过来。
+   * 3) 相邻两次快照隔得久（超过 BALANCE_GAP_MS）时，这段分摊只是估算，表里带 ≈；
+   *    本机助手会去读 balance.log 把这段换成真实快照。
    */
   let balanceCache = null;
 
   function balanceDayList() {
     if (balanceCache) return balanceCache;
     const days = new Map();
-    for (const snapshot of state.balances) {
-      /* 0 元快照只用于展示当前余额，不能当跨天基线。 */
-      if (Number(snapshot.v) <= 0) continue;
-      const item = days.get(snapshot.d) || {
-        day: snapshot.d,
-        first: snapshot,
-        last: snapshot,
-        count: 0,
-      };
+    const ensureDay = (day) => {
+      let item = days.get(day);
+      if (!item) {
+        item = {
+          day,
+          count: 0,
+          first: null,
+          last: null,
+          spend: 0,
+          spendKnown: false,
+          gapMs: 0,
+          currency: "CNY",
+          close: null,
+          closeEstimated: false,
+        };
+        days.set(day, item);
+      }
+      return item;
+    };
+    /* 0 元快照是查询失败的占位，只用于显示当前余额，不参与记账。 */
+    const snapshots = state.balances
+      .filter((snapshot) => Number(snapshot.v) > 0)
+      .slice()
+      .sort((a, b) => Number(a.t) - Number(b.t));
+    for (const snapshot of snapshots) {
+      const item = ensureDay(snapshot.d || todayKey(snapshot.t));
       item.count += 1;
-      if (Number(snapshot.t) < Number(item.first.t)) item.first = snapshot;
-      if (Number(snapshot.t) >= Number(item.last.t)) item.last = snapshot;
-      days.set(snapshot.d, item);
+      if (!item.first || Number(snapshot.t) < Number(item.first.t)) {
+        item.first = snapshot;
+      }
+      if (!item.last || Number(snapshot.t) >= Number(item.last.t)) {
+        item.last = snapshot;
+      }
+      item.currency = String(snapshot.c || item.currency || "CNY").toUpperCase();
+    }
+    for (let index = 1; index < snapshots.length; index += 1) {
+      const previous = snapshots[index - 1];
+      const current = snapshots[index];
+      const delta = Number(previous.v) - Number(current.v);
+      const span = Number(current.t) - Number(previous.t);
+      if (!Number.isFinite(delta) || !delta || !(span > 0)) continue;
+      const gap = span > BALANCE_GAP_MS;
+      for (const part of splitByDay(previous.t, current.t)) {
+        const item = ensureDay(part.day);
+        item.spend += delta * (part.ms / span);
+        item.spendKnown = true;
+        if (gap) item.gapMs += part.ms;
+        /* 整天被断档跨过时，收盘余额按两端余额线性估一个。 */
+        if (!item.last) {
+          const left = part.end - Number(previous.t);
+          item.close = Number(
+            (Number(previous.v) - delta * (left / span)).toFixed(6)
+          );
+          item.closeEstimated = true;
+        }
+      }
     }
     const list = Array.from(days.values()).sort((a, b) =>
       a.day < b.day ? -1 : a.day > b.day ? 1 : 0
     );
-    list.forEach((item, index) => {
-      const previous = index > 0 ? list[index - 1] : null;
-      item.open = previous ? Number(previous.last.v) : null;
-      item.close = Number(item.last.v);
-      item.spend = previous
-        ? Number((Number(previous.last.v) - Number(item.last.v)).toFixed(6))
-        : null;
-      /* 还没有跨天基线时，用当天首尾快照给出当日消耗（会偏低，仅作参考）。 */
-      item.spendFromFirst = Number(
-        (Number(item.first.v) - Number(item.last.v)).toFixed(6)
-      );
-      item.spanDays = previous ? dayDistance(previous.day, item.day) : 0;
-    });
+    for (const item of list) {
+      item.spend = item.spendKnown ? Number(item.spend.toFixed(6)) : null;
+      if (item.last) {
+        item.close = Number(item.last.v);
+        item.currency = String(item.last.c || item.currency || "CNY").toUpperCase();
+      } else if (item.close === null) {
+        item.close = 0;
+        item.closeEstimated = true;
+      }
+    }
     balanceCache = list;
     return list;
   }
@@ -1166,21 +1235,21 @@ const VERSION = "1.19.7";
   }
 
   function balanceMonthSpend(month, dayList = balanceDayList()) {
-    const list = dayList;
-    const inside = list.filter((item) => item.day.startsWith(month));
+    const inside = dayList.filter((item) => item.day.startsWith(month));
     if (!inside.length) return null;
     const first = inside[0];
-    const close = Number(inside[inside.length - 1].last.v);
-    const hasOpen = first.open !== null && first.open !== undefined;
-    const open = hasOpen ? Number(first.open) : Number(first.first.v);
-    const previous = hasOpen ? list[list.indexOf(first) - 1] : null;
+    const last = inside[inside.length - 1];
+    const covered = inside.filter((item) => item.spend !== null);
     return {
-      open,
-      close,
-      spend: Number((open - close).toFixed(6)),
-      spanDays: first.spanDays,
-      from: previous ? previous.day : first.day,
-      to: inside[inside.length - 1].day,
+      open: first.first ? Number(first.first.v) : Number(first.close),
+      close: Number(last.close),
+      spend: Number(
+        covered.reduce((sum, item) => sum + Number(item.spend), 0).toFixed(6)
+      ),
+      from: first.day,
+      to: last.day,
+      days: covered.length,
+      currency: last.currency || "CNY",
     };
   }
 
@@ -2237,7 +2306,7 @@ const VERSION = "1.19.7";
           </div>
           <div class="dsu-balance-table">
             <table>
-              <thead><tr><th>日期</th><th class="dsu-num">收盘余额</th><th class="dsu-num">余额消耗</th><th class="dsu-num">费率估算</th></tr></thead>
+              <thead><tr><th>日期</th><th class="dsu-num" title="当天最后一次读到的账户余额">收盘余额</th><th class="dsu-num" title="账户级：当天快照逐笔累加，含账号里其他使用者">余额消耗</th><th class="dsu-num" title="本机 Codex 按官方费率估算，不含账号其他使用者">本机估算</th></tr></thead>
               <tbody data-field="balanceRows"></tbody>
             </table>
           </div>
@@ -3807,10 +3876,10 @@ const VERSION = "1.19.7";
           `<div class="dsu-tip-row dsu-tip-cost"><span>费用</span><b>${formatCost(data.cost)}</b></div>`
         : '<div class="dsu-tip-row"><span>调用</span><b>无</b></div>') +
       (balanceItem
-        ? `<div class="dsu-tip-row dsu-tip-balance"><span>收盘余额</span><b>${formatBalance(balanceItem.close, balanceItem.last.c)}</b></div>` +
+        ? `<div class="dsu-tip-row dsu-tip-balance"><span>收盘余额</span><b>${balanceItem.closeEstimated ? "≈" : ""}${formatBalance(balanceItem.close, balanceItem.currency)}</b></div>` +
           (balanceItem.spend === null
             ? ""
-            : `<div class="dsu-tip-row dsu-tip-balance"><span>余额消耗</span><b>${formatBalanceSpend(balanceItem.spend, balanceItem.last.c)}</b></div>`)
+            : `<div class="dsu-tip-row dsu-tip-balance"><span>余额消耗</span><b>${formatBalanceSpend(balanceItem.spend, balanceItem.currency)}</b></div>`)
         : "");
     tooltip.hidden = false;
 
@@ -3925,40 +3994,40 @@ const VERSION = "1.19.7";
       setText(
         "balanceToday",
         todayItem && todayItem.spend !== null
-          ? formatBalanceSpend(todayItem.spend, todayItem.last.c)
-          : todayItem && todayItem.count > 1
-            ? formatBalanceSpend(todayItem.spendFromFirst, todayItem.last.c)
-            : "—"
+          ? formatBalanceSpend(todayItem.spend, todayItem.currency)
+          : "—"
       );
       setText(
         "balanceTodayHint",
         todayItem
-          ? todayItem.spend === null
-            ? todayItem.count > 1
-              ? "自今日首次记录起"
-              : "需要跨天的两次快照"
-            : `快照 ${todayItem.count} 次`
+          ? todayItem.spend !== null
+            ? `快照 ${todayItem.count} 次 · 当天累加`
+            : todayItem.count > 0
+            ? "等下一次快照就能算"
+            : "今日暂无快照"
           : "今日暂无快照"
       );
       setText(
         "balanceYesterday",
         yesterdayItem && yesterdayItem.spend !== null
-          ? formatBalanceSpend(yesterdayItem.spend, yesterdayItem.last.c)
+          ? formatBalanceSpend(yesterdayItem.spend, yesterdayItem.currency)
           : "—"
       );
       setText(
         "balanceYesterdayHint",
         yesterdayItem
-          ? `收盘 ${formatBalance(yesterdayItem.close, yesterdayItem.last.c)}`
+          ? `收盘 ${formatBalance(yesterdayItem.close, yesterdayItem.currency)}`
           : "昨日无快照"
       );
       setText(
         "balanceMonth",
-        monthInfo ? formatBalanceSpend(monthInfo.spend, currency) : "—"
+        monthInfo ? formatBalanceSpend(monthInfo.spend, monthInfo.currency) : "—"
       );
       setText(
         "balanceMonthHint",
-        monthInfo ? `自 ${monthInfo.from} 起` : "本月暂无余额"
+        monthInfo
+          ? `自 ${monthInfo.from} 起 · ${monthInfo.days} 天`
+          : "本月暂无余额"
       );
 
       if (state.ui.balanceSyncHint) {
@@ -4021,17 +4090,17 @@ const VERSION = "1.19.7";
                 const estimated = dayCost.get(item.day) || 0;
                 const spend =
                   item.spend === null
-                    ? item.count > 1
-                      ? formatBalanceSpend(item.spendFromFirst, item.last.c) +
-                        ' <span class="dsu-balance-span">(当日)</span>'
-                      : '<span class="dsu-balance-span">基线</span>'
-                    : formatBalanceSpend(item.spend, item.last.c) +
-                      (item.spanDays > 1
-                        ? ` <span class="dsu-balance-span">(${item.spanDays}天)</span>`
+                    ? '<span class="dsu-balance-span">单次快照</span>'
+                    : formatBalanceSpend(item.spend, item.currency) +
+                      (item.gapMs > 0
+                        ? ' <span class="dsu-balance-span" title="这段快照隔得久，按时间比例分摊，可能有偏差（助手读到 balance.log 后会修正）">≈</span>'
                         : "");
+                const close = item.closeEstimated
+                  ? `<span class="dsu-balance-span" title="断档期间没有快照，按前后两次余额线性估算">≈${formatBalance(item.close, item.currency)}</span>`
+                  : formatBalance(item.close, item.currency);
                 return (
                   `<tr><td>${escapeHtml(item.day.slice(5))}</td>` +
-                  `<td class="dsu-num">${formatBalance(item.close, item.last.c)}</td>` +
+                  `<td class="dsu-num">${close}</td>` +
                   `<td class="dsu-num">${spend}</td>` +
                   `<td class="dsu-num">${estimated ? formatCost(estimated) : "—"}</td></tr>`
                 );

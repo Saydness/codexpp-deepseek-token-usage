@@ -8,7 +8,7 @@ Codex 页面被安全策略禁止联网（CSP 加上跨域限制），面板自�
 
 ## 文件
 
-- `dstu-helper.mjs`：助手本体，每 15 秒心跳、每 5 分钟读一次余额，面板点「刷新余额」时立刻重读；
+- `dstu-helper.mjs`：助手本体，每 15 秒心跳、每 5 分钟读一次余额，面板点「刷新余额」时立刻重读；每读到一次余额还会往同目录的 `balance.log` 追加一行本机流水；
 - `balance_sources.mjs`：余额来源的解析与请求；
 - `set_balance_key.ps1`：Windows 上用 DPAPI（当前用户）保存 / 查看 / 清除 Key；
 - `install-helper.ps1` + `start-helper.vbs`：Windows 的一键安装脚本与看门狗（Codex 启动时拉起助手，退出就停）；
@@ -97,6 +97,29 @@ node dstu-helper.mjs
 | 4 | `~/.codex/auth.json` | Codex 自己保存的 Key |
 | 5 | 本机加密保存的 Key | Windows：用 `set_balance_key.ps1` 存一次，助手用 DPAPI 加密存到 `%LOCALAPPDATA%\Codex++\deepseek-balance.key`；macOS：存进登录钥匙串（`security add-generic-password -a codexpp -s deepseek-balance -w`，助手直接读得到） |
 
+## 余额流水（`balance.log`）
+
+助手会把每次读到的余额写成一行本机流水，格式和你自己写的脚本一致：
+
+```text
+2026-09-20 14:35:02,8055.14,helper
+2026-09-20 14:40:02,8054.90,helper
+```
+
+- **写**：默认写助手目录下的 `balance.log`（可用 `DSTU_BALANCE_LOG` 改路径）；文件很小，
+  每 5 分钟一行，一年也就几百 KB，不会自动清理。
+- **读**：启动时把日志整段补一次、之后每 15 分钟补增量，回填进面板的余额历史
+  （面板按「同一时刻、或同一分钟内同一金额」去重，重复导入不会翻倍）。
+- 除了自己这份，还会读这几个位置（存在哪个读哪个）：`DSTU_BALANCE_LOG_EXTRA` 里用
+  系统路径分隔符列出的文件、桌面上的 `balance/balance.log`（含 OneDrive 桌面）、
+  文档目录下的 `balance/balance.log`。所以用户以前用手写脚本攒的余额日志会被自动接上，
+  面板没有快照的那几天也能补成真实数据。
+- **写不进去怎么办**：看门狗如果是在 Codex 的沙箱里被拉起来的（用面板「一键安装」时
+  会出现这种情况，沙箱里网络能通、但一个文件都写不了），流水就写不出本机。助手会把
+  这件事报在面板状态行上（「本机余额流水写不进去…」），照提示在普通 PowerShell / 终端里
+  重跑一次安装命令即可：看门狗换成你终端里的进程后，写权限就正常了。余额和用量统计
+  不受影响，只是本机流水暂时没有。
+
 ## 环境变量
 
 | 变量 | 默认值 | 作用 |
@@ -104,6 +127,10 @@ node dstu-helper.mjs
 | `DSTU_CDP` | `http://127.0.0.1:9229` | Codex 的本地调试端口 |
 | `DSTU_BALANCE_URL` | 空 | 本机代理的余额接口地址；不设就跳过这一来源 |
 | `DSTU_USAGE_LOG` | 空 | 可选的用量日志（JSONL），会把日志里的记录补进面板 |
+| `DSTU_BALANCE_LOG` | 助手目录下的 `balance.log` | 本机余额流水写到哪 |
+| `DSTU_BALANCE_LOG_EXTRA` | 空 | 额外要回读的余额日志路径（多个用系统路径分隔符隔开） |
+| `DSTU_BALANCE_LOG_INTERVAL_MS` | `900000` | 回填余额日志的间隔（15 分钟） |
+| `DSTU_BALANCE_LOG_LIMIT` | `1500` | 启动时最多回填多少条（防止日志特别长时卡顿） |
 | `DSTU_KEY_STORE` | Windows `%LOCALAPPDATA%\Codex++\deepseek-balance.key`；macOS `~/Library/Application Support/Codex++/deepseek-balance.key`（实际读钥匙串） | 加密保存 Key 的位置 |
 | `DSTU_POLL_MS` | `15000` | 心跳间隔 |
 | `DSTU_BALANCE_INTERVAL_MS` | `300000` | 自动读余额的间隔 |

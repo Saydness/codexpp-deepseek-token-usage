@@ -8,6 +8,9 @@
  *      and it reacts within one poll when the panel asks for a refresh;
  *   2. optionally imports an external usage log (set DSTU_USAGE_LOG) into the
  *      panel, so records the page itself missed can be filled back in.
+ *   3. keeps a local balance ledger (balance.log, one line per reading) and
+ *      merges it back into the panel, so a day the page missed still has a
+ *      reference to fall back on.
  * The balance has to come from outside the page: Codex Desktop's renderer CSP
  * has no connect-src entry for deepseek, so the panel itself cannot call the
  * balance endpoint (or anything else). This script does the real GET and only
@@ -24,6 +27,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   clearStoredKey,
   readAuthKey,
@@ -82,6 +86,32 @@ const PAGE_GRACE = Math.max(4, Math.round(300000 / pollMs));
 const logPath = process.env.DSTU_LOG || '';
 const LOG_MAX_BYTES = 200 * 1024;
 
+/*
+ * 本机余额流水：每读到一次余额就往 balance.log 追加一行，格式和用户自己写的
+ * 脚本一致（2026-09-20 14:35:02,8055.14,helper），两边可以混着读。
+ * 面板的快照只存在页面里，页面数据清掉、或者助手停过一段时间时，
+ * 这份日志就是「没有参考时」的依据；启动和运行中都会把它回填进面板。
+ */
+const helperDir = path.dirname(fileURLToPath(import.meta.url));
+const balanceLogPath =
+  process.env.DSTU_BALANCE_LOG || path.join(helperDir, 'balance.log');
+const balanceLogExtra = (process.env.DSTU_BALANCE_LOG_EXTRA || '')
+  .split(path.delimiter)
+  .map((item) => item.trim())
+  .filter(Boolean);
+const balanceLogSources = [
+  balanceLogPath,
+  ...balanceLogExtra,
+  path.join(os.homedir(), 'Desktop', 'balance', 'balance.log'),
+  path.join(os.homedir(), 'OneDrive', 'Desktop', 'balance', 'balance.log'),
+  path.join(os.homedir(), 'Documents', 'balance', 'balance.log'),
+];
+const BALANCE_LOG_MAX_BYTES = 8 * 1024 * 1024;
+const BALANCE_LOG_LIMIT = Number(process.env.DSTU_BALANCE_LOG_LIMIT || 1500);
+const balanceLogIntervalMs = Number(
+  process.env.DSTU_BALANCE_LOG_INTERVAL_MS || 15 * 60 * 1000
+);
+
 /* 只写运行情况（时间、条数、错误），不写密钥、不写请求正文。 */
 function logLine(message) {
   console.log(message);
@@ -120,6 +150,122 @@ function readRecords() {
     }
   }
   return records;
+}
+
+function localStamp(ms) {
+  const date = new Date(ms);
+  const pad = (value) => String(value).padStart(2, '0');
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  );
+}
+
+/* 和面板存的小数位保持一致，回填时才能被当成同一个数去重。 */
+function trimNumber(value) {
+  const text = Number(value).toFixed(6);
+  return text.includes('.') ? text.replace(/0+$/, '').replace(/\.$/, '') : text;
+}
+
+/*
+ * 追加一行余额流水。正常情况一路都好；写不进去就只有一种常见原因：助手是被
+ * Codex 的沙箱拉起来的（一键安装时留下的看门狗继承了沙箱限制，网络能通、文件
+ * 一个都写不了）。这种情况要明确告诉用户，不然「流水为什么是空的」根本查不出来。
+ */
+let ledgerState = 'unknown';
+let ledgerNoteAt = 0;
+const LEDGER_NOTE_INTERVAL_MS = 30 * 60 * 1000;
+const LEDGER_BLOCKED_NOTE =
+  '本机余额流水写不进去（助手这次被沙箱拉起）：在普通 PowerShell 里重跑一次安装命令即可';
+
+function appendBalanceLog(value, at = Date.now()) {
+  try {
+    fs.appendFileSync(
+      balanceLogPath,
+      `${localStamp(at)},${trimNumber(value)},helper\n`
+    );
+    if (ledgerState !== 'ok') {
+      ledgerState = 'ok';
+      logLine(`balance log: writing to ${balanceLogPath}`);
+    }
+    return true;
+  } catch (error) {
+    if (ledgerState !== 'failed') {
+      ledgerState = 'failed';
+      logLine(
+        `balance log: cannot write ${balanceLogPath}` +
+          ` (${(error && error.code) || 'error'})`
+      );
+    }
+    return false;
+  }
+}
+
+/* 写不进去时，隔一段时间在面板状态里提醒一次，别每 15 秒刷一遍。 */
+function ledgerNote() {
+  if (ledgerState !== 'failed') return '';
+  const now = Date.now();
+  if (now - ledgerNoteAt < LEDGER_NOTE_INTERVAL_MS) return '';
+  ledgerNoteAt = now;
+  return LEDGER_BLOCKED_NOTE;
+}
+
+/* 读一份余额日志：只认「时间,余额」两列，后面还写了什么不影响。 */
+function readBalanceLog(file) {
+  const entries = [];
+  try {
+    if (!file || !fs.existsSync(file)) return entries;
+    if (fs.statSync(file).size > BALANCE_LOG_MAX_BYTES) return entries;
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+      const matched = line.match(
+        /^\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.\d+)?\s*,\s*([0-9]+(?:\.[0-9]+)?)/
+      );
+      if (!matched) continue;
+      const at = Date.parse(`${matched[1]}T${matched[2]}`);
+      const value = Number(matched[3]);
+      if (!Number.isFinite(at) || !Number.isFinite(value) || value <= 0) continue;
+      entries.push({ t: at, v: value, c: 'CNY', s: 'log' });
+    }
+  } catch (_) {
+    /* 读不到就当这份日志不存在 */
+  }
+  return entries;
+}
+
+let balanceLogWatermark = 0;
+
+/*
+ * 把本机余额日志里的快照补进面板（面板按时刻+金额去重，重复导入不会翻倍）。
+ * bootstrap 时会忽略水位、把最近的记录整段补一次，用于页面换新/清过缓存的情况。
+ */
+async function importBalanceLog({ bootstrap = false, waitMs = 0 } = {}) {
+  const collected = new Map();
+  for (const file of balanceLogSources) {
+    for (const entry of readBalanceLog(file)) {
+      if (!bootstrap && entry.t <= balanceLogWatermark) continue;
+      collected.set(`${entry.t}|${entry.v}`, entry);
+    }
+  }
+  let entries = Array.from(collected.values()).sort((a, b) => a.t - b.t);
+  if (bootstrap && entries.length > BALANCE_LOG_LIMIT) {
+    entries = entries.slice(-BALANCE_LOG_LIMIT);
+  }
+  if (!entries.length) return 0;
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const imported = await evaluateInPage(
+      `window.__deepseekUsagePanel?.importBalanceSnapshots?.(${JSON.stringify(entries)})`
+    );
+    if (imported !== undefined) {
+      for (const entry of entries) {
+        if (entry.t > balanceLogWatermark) balanceLogWatermark = entry.t;
+      }
+      logLine(`balance log: ${imported ?? 0} snapshot(s) merged`);
+      return imported ?? 0;
+    }
+    if (Date.now() >= deadline) return null;
+    await sleep(2000);
+  }
 }
 
 async function findTarget() {
@@ -312,6 +458,8 @@ async function pushBalance(force, preference) {
       tried: Array.isArray(balance?.tried) ? balance.tried : [],
     };
   }
+  /* 不管面板接不接，先把这次读到的余额落进本机流水，之后可以回填。 */
+  appendBalanceLog(balance.value);
   const result = await evaluateInPage(
     `(() => { const panel = window.__deepseekUsagePanel;` +
       ` if (!panel) return 'no-panel';` +
@@ -341,6 +489,7 @@ async function pushBalance(force, preference) {
 let missingPageChecks = 0;
 let lastPushAt = 0;
 let lastImportAt = Date.now();
+let lastLogImportAt = Date.now();
 /* 记住上一次成功用的是哪条路：心跳也要带上，面板刷新/注入后不用等下一次推送。 */
 let lastSourceUsed = '';
 
@@ -350,6 +499,9 @@ if (!jsonlPath) {
   const firstImport = await importUsage({ waitMs: 300000, bootstrap: true });
   if (firstImport === null) logLine('usage import: panel never became reachable');
 }
+/* 本机余额流水先补一次：面板被清过、或助手停过几天时，这能把缺口填回来。 */
+const firstLogImport = await importBalanceLog({ bootstrap: true, waitMs: 60000 });
+if (firstLogImport === null) logLine('balance log: panel never became reachable');
 
 for (;;) {
   const sync = await readPanelSync();
@@ -368,6 +520,12 @@ for (;;) {
   if (jsonlPath && Date.now() - lastImportAt >= importIntervalMs) {
     lastImportAt = Date.now();
     await importUsage({ waitMs: 0 });
+  }
+
+  /* 定期把本机余额日志里新增的流水补进面板。 */
+  if (Date.now() - lastLogImportAt >= balanceLogIntervalMs) {
+    lastLogImportAt = Date.now();
+    await importBalanceLog({ waitMs: 0 });
   }
 
   /* 面板点过「保存 Key / 清除 Key」就先办掉，之后再读余额。 */
@@ -422,7 +580,7 @@ for (;;) {
       keySaved: keyResult.keySaved,
       keyCleared: keyResult.keyCleared,
       handledRequestAt: Number(sync.requestAt) || 0,
-      note,
+      note: note || ledgerNote(),
     });
   } else {
     const at = await ack({
@@ -431,6 +589,7 @@ for (;;) {
       sourceUsed: lastSourceUsed,
       keySaved: keyResult.keySaved,
       keyCleared: keyResult.keyCleared,
+      note: ledgerNote(),
     });
     if (!at) logLine('panel stopped answering, will retry');
   }
