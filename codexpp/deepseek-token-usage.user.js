@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.19.9
+// @version      1.19.10
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.19.9";
+  const VERSION = "1.19.10";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -2719,7 +2719,45 @@
         display: flex; align-items: center; gap: 5px;
         color: #94a3b8; font-size: 11px; cursor: pointer;
       }
-      .dsu-balance-enable input { accent-color: #38bdf8; margin: 0; }
+    /*
+     * 勾选框自己画：Codex 应用 26.915 起给原生 checkbox 设了
+     * appearance:none / width:0 / height:0，跟着应用走的话这颗框会整个消失，
+     * 只剩一个点不动的「启用」文字。这里连尺寸、边框、对勾一起自带。
+     */
+    .dsu-balance-enable input {
+      appearance: none;
+      -webkit-appearance: none;
+      flex: 0 0 auto;
+      width: 13px;
+      height: 13px;
+      margin: 0;
+      border: 1px solid #3f4c5e;
+      border-radius: 3px;
+      background: #131a24;
+      position: relative;
+      cursor: pointer;
+      transition: background 0.12s ease, border-color 0.12s ease;
+    }
+    .dsu-balance-enable:hover input { border-color: #52627a; }
+    .dsu-balance-enable input:checked {
+      background: #38bdf8;
+      border-color: #38bdf8;
+    }
+    .dsu-balance-enable input:checked::after {
+      content: "";
+      position: absolute;
+      left: 3.5px;
+      top: 0.5px;
+      width: 3px;
+      height: 7px;
+      border: solid #0b1220;
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
+    }
+    .dsu-balance-enable input:focus-visible {
+      outline: 2px solid rgba(56, 189, 248, 0.5);
+      outline-offset: 1px;
+    }
       .dsu-balance-help { border-top: 1px dashed #232c38; padding-top: 10px; }
       .dsu-balance-help summary { color: #64748b; font-size: 11px; cursor: pointer; }
       .dsu-balance-help summary:hover { color: #94a3b8; }
