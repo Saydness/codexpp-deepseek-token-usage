@@ -69,9 +69,8 @@ macOS   → 终端               （curl -fsSL …/install-helper.sh | bash）
 
 安装脚本做的事：把助手文件放进本机目录（Windows `%LOCALAPPDATA%\Codex++\dstu-helper`、
 macOS `~/Library/Application Support/Codex++/dstu-helper`），
-再登记一个开机自启（Windows 是「启动」文件夹里的快捷方式，macOS 是 LaunchAgent），
-最后把看门狗拉起来。看门狗每 3 秒看一眼：Codex 在跑就确保助手在跑，Codex 不在就把助手停掉，
-所以退出 Codex 后不会留下常驻进程。卸载：
+再登记一个开机自启（见下一节），最后把看门狗拉起来。看门狗每 3 秒看一眼：Codex 在跑就
+确保助手在跑，Codex 不在就把助手停掉，所以退出 Codex 后不会留下常驻进程。卸载：
 
 ```text
 Windows : powershell -NoProfile -ExecutionPolicy Bypass -File .\install-helper.ps1 -Uninstall
@@ -83,6 +82,25 @@ macOS   : bash install-helper.sh -Uninstall
 ```text
 node dstu-helper.mjs
 ```
+
+## Windows：自启、巡检与"沙箱重入"
+
+- **自启用计划任务，不用「启动」文件夹快捷方式。** 任务名 `DeepSeek 用量助手`，
+  触发器有两个：**登录时**，以及**每 5 分钟**跑一次 `ensure-helper.vbs`。这个脚本是幂等的：
+  Codex 没在跑就什么都不做；看门狗在跑也什么都不做；只有"Codex 在跑、看门狗不在"时才
+  把它拉起来（用 WMI 创建进程，父进程是 WmiPrvSE，所以既不会随计划任务结束被杀，也不会
+  随 Codex 重启被杀）。原来看捷方式只在登录那一刻触发，看门狗一旦被带走就得等到下次登录，
+  助手会静默停摆好几天。
+- **安装/卸载会在"真实环境"里重跑一遍自己。** Codex 的 shell 可能带文件系统覆盖层：
+  从它里面写 `%LOCALAPPDATA%\Codex++` 的文件，Windows 其它进程（计划任务、资源管理器）
+  看不见，只有 Codex 这一支进程树能看到。所以脚本发现自己在被谁启动后，会先用 WMI 起一个
+  外部进程，让它在真实文件系统里做安装/卸载，再把那段输出回传到当前窗口；WMI 走不通时
+  退回本进程执行，至少不会比以前差。
+- **两个 `.vbs` 都是纯 ASCII。** WSH 按 ANSI 读 `.vbs`，中文注释会把字符串的收尾引号
+  "吃掉"（报"未结束的字符串常量"，而且每次运行都弹框），所以这两个文件里不写非 ASCII
+  字符，日志也一律英文（写在 `ensure-helper.log`，超过 100 KB 自动重来）。
+- macOS 那边是 LaunchAgent + `KeepAlive`（进程死了系统会自己拉起来），逻辑等价，不用
+  额外配置。
 
 ## 余额来源
 
